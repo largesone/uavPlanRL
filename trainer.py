@@ -13,6 +13,9 @@ import matplotlib.pyplot as plt
 from typing import Dict, List, Tuple, Optional
 from datetime import datetime
 
+from collections import deque
+from scenarios import _generate_scenario # 导入场景生成函数
+
 from config import Config
 from environment import UAVTaskEnv, DirectedGraph
 from solvers import GraphRLSolver
@@ -46,6 +49,52 @@ class ModelTrainer:
         print(f"[ModelTrainer] 初始化完成")
         print(f"  - 场景记录目录: {self.scenario_log_dir}")
         print(f"  - 最大保存最优模型数量: {self.max_best_models}")
+    def _calculate_level_parameters(self, level: int) -> Dict:
+        """
+        函数级注释：根据当前课程等级，通过线性插值计算场景参数。
+
+        Args:
+            level (int): 当前的课程等级 (从0开始)。
+
+        Returns:
+            Dict: 包含 uav_num, target_num, obstacle_num, resource_abundance 的字典。
+        """
+        total_levels = self.config.GRANULAR_CURRICULUM_LEVELS
+
+        # 计算当前进度比例 (0.0 to 1.0)
+        # 当只有一级时，progress_ratio为0，使用起始参数
+        if total_levels > 1:
+            progress_ratio = level / (total_levels - 1)
+        else:
+            progress_ratio = 0
+
+        # UAV 数量插值
+        start_uavs = self.config.GRANULAR_START_UAVS
+        end_uavs = self.config.MAX_UAVS
+        uav_num = int(round(start_uavs + progress_ratio * (end_uavs - start_uavs)))
+
+        # 目标数量插值
+        start_targets = self.config.GRANULAR_START_TARGETS
+        end_targets = self.config.MAX_TARGETS
+        target_num = int(round(start_targets + progress_ratio * (end_targets - start_targets)))
+
+        # 障碍物数量插值
+        start_obstacles = self.config.GRANULAR_START_OBSTACLES
+        end_obstacles = self.config.GRANULAR_END_OBSTACLES
+        obstacle_num = int(round(start_obstacles + progress_ratio * (end_obstacles - start_obstacles)))
+
+        # 资源充裕度插值 (从高到低)
+        start_abundance = self.config.GRANULAR_START_ABUNDANCE
+        end_abundance = self.config.GRANULAR_END_ABUNDANCE
+        resource_abundance = start_abundance + progress_ratio * (end_abundance - start_abundance)
+
+        return {
+            "uav_num": uav_num,
+            "target_num": target_num,
+            "obstacle_num": obstacle_num,
+            "resource_abundance": resource_abundance
+        }
+
     
     def ensure_scenario_log_dir(self):
         """确保场景记录目录存在"""
@@ -1967,295 +2016,155 @@ class ModelTrainer:
             print(f"阶段 {scenario_name} 完成", flush=True)
     
     def _curriculum_training_graph(self) -> None:
-        """基于图的课程学习训练（ZeroShotGNN专用）- 支持自适应晋级机制"""
-        # 检查是否启用自适应课程训练
-        if self.config.is_adaptive_curriculum_enabled:
-            print("执行自适应课程学习训练...")
+        """基于图的课程学习训练（ZeroShotGNN专用）- 支持自适应晋级机制"""    
+        # 检查是否启用自适应课程训练 (当前默认替换为新的渐进式策略)
+        if self.config.CURRICULUM_USE_GRANULAR_PROGRESSION:
+            print("执行渐进式自适应课程学习训练...")
             self._adaptive_curriculum_training_graph()
         else:
-            print("执行传统课程学习训练...")
+            # 如果需要，可以保留旧的基于模板的自适应或固定流程作为备选
+            print("执行传统的固定课程学习训练...")
             self._traditional_curriculum_training_graph()
-    
+            
     def _adaptive_curriculum_training_graph(self) -> None:
-        """自适应课程学习训练 - 基于智能体表现动态晋级"""
-        try:
-            # 记录课程训练开始时间
-            curriculum_start_time = time.time()
-            
-            # 获取预定义的课程学习场景序列
-            from scenarios import get_curriculum_scenarios
-            curriculum_scenarios = get_curriculum_scenarios(large_scale=False)
-            
-            # 初始化自适应组件
-            performance_monitor = PerformanceMonitor(self.config)
-            promotion_decider = PromotionDecider(self.config)
-            
-            # 创建求解器（使用第一个场景初始化）
-            first_scenario_func, _, _ = curriculum_scenarios[0]
-            uavs, targets, obstacles = first_scenario_func(obstacle_tolerance=50.0)
-            graph = DirectedGraph(uavs, targets, self.config.GRAPH_N_PHI, obstacles, self.config)
-            
-            i_dim = 64  # ZeroShotGNN固定输入维度
-            o_dim = len(targets) * len(uavs) * graph.n_phi
-            obs_mode = "graph"  # ZeroShotGNN使用图模式
-            
-            solver = GraphRLSolver(uavs, targets, graph, obstacles, i_dim, 
-                                  [self.config.hyperparameters.hidden_dim], o_dim, self.config, obs_mode=obs_mode)
-            
-            global_episode_counter = 0
-            best_reward = float('-inf')
-            current_level_index = 0
-            
-            print(f"🎯 自适应课程训练开始，共 {len(curriculum_scenarios)} 个等级")
-            print(f"📊 掌握度阈值: {self.config.CURRICULUM_MASTERY_THRESHOLD:.2f}, "
-                  f"性能窗口: {self.config.CURRICULUM_PERFORMANCE_WINDOW}, "
-                  f"最大轮次/等级: {self.config.CURRICULUM_MAX_EPISODES_PER_LEVEL}")
-            
-            # 自适应训练主循环
-            while current_level_index < len(curriculum_scenarios):
-                scenario_func, scenario_name, scenario_desc = curriculum_scenarios[current_level_index]
-                
-                # 初始化当前等级的性能监控
-                level_performance = performance_monitor.initialize_level(current_level_index, scenario_name)
-                
-                print(f"\n🚀 开始等级 {current_level_index + 1}/{len(curriculum_scenarios)}: {scenario_name}")
-                print(f"📝 场景描述: {scenario_desc}")
-                
-                # 生成当前等级的场景
-                uavs, targets, obstacles = scenario_func(obstacle_tolerance=50.0)
-                
-                # 设置最大步数
-                max_steps_per_episode = self._get_adaptive_max_steps(scenario_name)
-                print(f"⏱️  最大步数: {max_steps_per_episode}, 最小训练轮次: {self.config.CURRICULUM_MIN_EPISODES_PER_LEVEL}")
-                
-                # 等级内训练循环
+        """
+        函数级注释：实现渐进式自适应课程学习的主流程。
+        该流程通过多个精细化的等级逐步增加场景复杂度，并根据模型的实时表现决定何时晋级。
+        包含了详细的日志记录功能，其详细程度由 config.LOG_LEVEL 控制。
+        """
+        # --- 1. 初始化 ---
+        total_levels = self.config.GRANULAR_CURRICULUM_LEVELS
+        solver = None
+        global_episode_counter = 0
+        best_reward = float('-inf')
+        curriculum_start_time = time.time()
+
+        # 获取日志级别
+        log_level = getattr(self.config, 'LOG_LEVEL', 'simple')
+
+        if getattr(self.config, 'LOG_EPISODE_DETAIL', False):
+            print(f"🚀 启动渐进式自适应课程学习, 共 {total_levels} 个等级")
+            print(f"📊 掌握度阈值: {self.config.CURRICULUM_MASTERY_THRESHOLD:.2f}, 性能窗口: {self.config.CURRICULUM_PERFORMANCE_WINDOW}")
+
+        # --- 2. 按等级进行主循环 ---
+        for level in range(total_levels):
+            level_start_time = time.time()
+
+            # --- 2.1. 计算当前等级的场景参数 ---
+            level_params = self._calculate_level_parameters(level)
+            scenario_name = f"Level_{level+1:02d}"
+            if getattr(self.config, 'LOG_EPISODE_DETAIL', False):
+                print("\n" + "="*80)
+                print(f"进入等级: {scenario_name} | UAVs:{level_params['uav_num']}, Targets:{level_params['target_num']}, Obstacles:{level_params['obstacle_num']}, Abundance:{level_params['resource_abundance']:.2f}")
+                print("="*80)
+
+            # --- 2.2. 初始化或更新求解器 ---
+            if solver is None:
+                # 首次创建求解器，使用最大维度以兼容所有等级
+                i_dim = 64  # ZeroShotGNN固定输入
+                max_o_dim = self.config.MAX_TARGETS * self.config.MAX_UAVS * self.config.GRAPH_N_PHI
+                solver = GraphRLSolver([], [], None, [], i_dim, 
+                                    [self.config.hyperparameters.hidden_dim], max_o_dim, 
+                                    self.config, obs_mode="graph")
+                # 绑定日志记录器
+                solver.step_logger = self.log_step_reward
+                solver.action_logger = self.log_action_details
+
+            # --- 2.3. 等级内的训练循环 ---
+            performance_window = deque(maxlen=self.config.CURRICULUM_PERFORMANCE_WINDOW)
+            max_episodes_per_level = self.config.CURRICULUM_MAX_EPISODES_PER_LEVEL
+
+            for episode_in_level in range(max_episodes_per_level):
+                global_episode_counter += 1
+                episode_start_time = time.time()
+
+                # --- 2.3.1. 动态生成当前等级的随机场景 ---
+                scenario_dict = _generate_scenario(self.config, **level_params)
+                uavs, targets, obstacles = scenario_dict['uavs'], scenario_dict['targets'], scenario_dict['obstacles']
+
+                # 更新solver的环境
+                graph = DirectedGraph(uavs, targets, self.config.GRAPH_N_PHI, obstacles, self.config)
+                solver.env = UAVTaskEnv(uavs, targets, graph, obstacles, self.config, obs_mode="graph")
+
+                # --- 2.3.2. 单个训练回合的核心逻辑 ---
+                state, _ = solver.env.reset(options={'scenario': scenario_dict})
+                episode_reward, step_count = 0.0, 0
+                total_base_reward, total_shaping_reward = 0.0, 0.0
+                episode_losses = []
+
                 while True:
-                    global_episode_counter += 1
-                    
-                    # 执行单轮训练
-                    episode_reward, detailed_info = self._train_episode_with_scenario(
-                        uavs, targets, obstacles, global_episode_counter - 1, scenario_name, 
-                        solver=solver, max_steps=max_steps_per_episode
-                    )
-                    
-                    # 计算完成率 - 使用环境的标准计算方法
-                    if hasattr(solver.env, 'get_completion_rate'):
-                        completion_rate = solver.env.get_completion_rate()
-                    else:
-                        # 后备方案：使用标准资源贡献计算方法
-                        completion_rate = self._calculate_standard_completion_rate(solver.env.targets)
-                    
-                    # 添加调试信息
-                    completed_targets = sum(1 for t in solver.env.targets if np.all(t.remaining_resources <= 0))
-                    print(f"   🔍 调试信息: 完成目标={completed_targets}/{len(solver.env.targets)}, "
-                          f"最终完成率={completion_rate:.3f}, "
-                          f"训练步数={detailed_info['step_count']}/{max_steps_per_episode}")
-                    
-                    # 显示目标状态详情（仅在完成率为0时显示，便于调试）
-                    if completion_rate == 0.0 and len(solver.env.targets) <= 3:
-                        for i, target in enumerate(solver.env.targets):
-                            remaining = np.sum(target.remaining_resources)
-                            total = np.sum(target.required_resources)
-                            print(f"     目标{i+1}: 剩余需求={remaining:.1f}/{total:.1f}")
-                    elif completion_rate > 0.0:
-                        print(f"   ✅ 成功完成 {completed_targets} 个目标！")
-                    
-                    # 记录性能数据
-                    metrics = PerformanceMetrics(
-                        completion_rate=completion_rate,
-                        episode_reward=episode_reward,
-                        step_count=detailed_info['step_count'],
-                        training_time=detailed_info.get('episode_time', 0.0)
-                    )
-                    performance_monitor.record_episode_performance(metrics)
-                    
-                    # 记录统计
-                    self.training_stats['episode_rewards'].append(episode_reward)
-                    self.training_stats['completion_rates'].append(completion_rate)
-                    
-                    # 获取性能摘要
-                    perf_summary = performance_monitor.get_performance_summary()
-                    mastery_score = perf_summary.get('mastery_score', 0.0)
-                    
-                    # 添加掌握度计算详情
-                    window_full = perf_summary.get('window_full', False)
-                    recent_rates = perf_summary.get('recent_completion_rates', [])
-                    episode_count = perf_summary.get('episode_count', 0)
-                    
-                    print(f"   📊 掌握度详情: 当前={mastery_score:.3f}, 阈值={self.config.CURRICULUM_MASTERY_THRESHOLD:.3f}, "
-                          f"窗口={len(recent_rates)}/{self.config.CURRICULUM_PERFORMANCE_WINDOW}, "
-                          f"窗口满={window_full}")
-                    
-                    if len(recent_rates) > 0:
-                        print(f"     最近完成率: {[f'{r:.3f}' for r in recent_rates[-5:]]}")  # 显示最近5个
-                    
-                    # 获取路径算法信息
-                    path_algo = "高精度PH-RRT" if self.config.USE_PHRRT_DURING_TRAINING else "快速近似"
-                    
-                    # 优化的课程训练控制台输出格式（与动态随机训练保持一致）
-                    episode_elapsed = detailed_info.get('episode_time', 0.0)
-                    
-                    # 计算资源充裕度信息
+                    action, _ = solver.select_action(state)
+                    next_state, reward, done, truncated, info = solver.env.step(action.item())
+
+                    episode_reward += reward
+                    total_base_reward += info.get('base_reward', 0.0)
+                    total_shaping_reward += info.get('shaping_reward', 0.0)
+
+                    solver.memory.push(state, action, torch.tensor([reward], device=solver.device), next_state, done or truncated)
+                    state = next_state
+                    loss = solver.optimize_model()
+                    if loss is not None:
+                        episode_losses.append(loss)
+
+                    step_count += 1
+                    if done or truncated:
+                        break
+
+                solver.epsilon = max(self.config.EPSILON_END, solver.epsilon * self.config.EPSILON_DECAY)
+                if global_episode_counter % self.config.TARGET_UPDATE_FREQ == 0:
+                    solver.target_net.load_state_dict(solver.policy_net.state_dict())
+
+                # --- 2.3.3. 日志记录、统计与晋级检查 ---
+                completion_rate = solver.env.get_completion_rate()
+                performance_window.append(completion_rate)
+
+                # 更新统计数据
+                self.training_stats['episode_rewards'].append(episode_reward)
+                self.training_stats['completion_rates'].append(completion_rate)
+                avg_loss = np.mean(episode_losses) if episode_losses else 0.0
+                self.training_stats['episode_losses'].append(avg_loss)
+
+                # 日志输出（遵循日志等级）
+                if log_level in ['detailed', 'debug']:
+                    episode_elapsed = time.time() - episode_start_time
                     resource_abundance_info = self._calculate_resource_abundance(uavs, targets)
-                    
-                    # 获取奖励分解信息
-                    total_base_reward = detailed_info.get('total_base_reward', episode_reward * 0.8)
-                    total_shaping_reward = detailed_info.get('total_shaping_reward', episode_reward * 0.2)
-                    
-                    # 【修复】使用实际环境中的场景数据，确保数据一致性
-                    actual_uavs = len(solver.env.uavs) if hasattr(solver, 'env') and hasattr(solver.env, 'uavs') else len(uavs)
-                    actual_targets = len(solver.env.targets) if hasattr(solver, 'env') and hasattr(solver.env, 'targets') else len(targets)
-                    actual_obstacles = len(solver.env.obstacles) if hasattr(solver, 'env') and hasattr(solver.env, 'obstacles') else len(obstacles)
-                    
-                    print(f"Episode {global_episode_counter:4d} [{scenario_name}|{path_algo}]: "
-                          f"无人机={actual_uavs}, 目标={actual_targets}, 障碍={actual_obstacles}, "
-                          f"{resource_abundance_info}, "
-                          f"步数={detailed_info['step_count']:2d}, "
-                          f"总奖励={episode_reward:7.1f}, "
-                          f"基础奖励={total_base_reward:6.1f}, "
-                          f"塑形奖励={total_shaping_reward:6.1f}, "
-                          f"完成率={completion_rate:.3f}, "
-                          f"掌握度={mastery_score:.3f}, "
-                          f"探索率={solver.epsilon:.3f}, "
-                          f"用时={episode_elapsed:.1f}s", flush=True)
-                    
-                    # 记录奖励信息（优化课程训练日志格式）
-                    self._log_episode_reward(
-                        global_episode_counter - 1, 0, detailed_info['step_count'],  # total_episodes设为0，因为是动态的
-                        episode_reward, total_base_reward, total_shaping_reward,
-                        completion_rate, solver.epsilon, episode_elapsed, detailed_info,
-                        uavs, targets, obstacles, scenario_name, solver
+                    path_algo = "高精度PH-RRT" if self.config.USE_PHRRT_DURING_TRAINING else "快速近似"
+
+                    print(
+                        f"Episode {global_episode_counter:5d} [{scenario_name}|{path_algo}]: "
+                        f"UAVs={len(uavs):2d}, Tgs={len(targets):2d}, Obs={len(obstacles):2d}, {resource_abundance_info}, "
+                        f"Steps={step_count:3d}, Reward={episode_reward:8.2f}, Base={total_base_reward:7.2f}, Shaping={total_shaping_reward:6.2f}, "
+                        f"CompRate={completion_rate:.3f}, Loss={avg_loss:.4f}, Epsilon={solver.epsilon:.3f}, Time={episode_elapsed:.1f}s"
                     )
-                    
-                    # 【新增】验证场景数据一致性
-                    self._validate_scenario_consistency(solver, scenario_name, global_episode_counter - 1)
-                    
-                    # 【修复】在训练完成后保存场景数据，确保使用正确的完成率
-                    should_log_inference = (global_episode_counter % self.config.EPISODE_INFERENCE_LOG_INTERVAL == 0)
-                    if should_log_inference:
-                        self.save_scenario_data(global_episode_counter - 1, uavs, targets, obstacles, 
-                                               scenario_name, solver=solver, completion_rate=completion_rate)
-                    else:
-                        self.save_scenario_data(global_episode_counter - 1, uavs, targets, obstacles, 
-                                               scenario_name, completion_rate=completion_rate)
-                    
-                    # 做出晋级决策
-                    decision = promotion_decider.make_decision(level_performance, performance_monitor)
-                    decision_rationale = promotion_decider.get_decision_rationale(decision, level_performance, performance_monitor)
-                    
-                    # 处理决策结果
-                    if decision == Decision.PROMOTE:
-                        print(f"🎉 {decision_rationale}")
-                        current_level_index += 1
+
+                # 写入到日志文件
+                self._log_episode_reward(
+                    global_episode_counter - 1, self.config.training_config.episodes, step_count,
+                    episode_reward, total_base_reward, total_shaping_reward,
+                    completion_rate, solver.epsilon, time.time() - episode_start_time, {},
+                    uavs, targets, obstacles, scenario_name, solver
+                )
+
+                # 检查晋级条件
+                if len(performance_window) >= self.config.CURRICULUM_PERFORMANCE_WINDOW:
+                    avg_completion = np.mean(performance_window)
+                    if avg_completion >= self.config.CURRICULUM_MASTERY_THRESHOLD:
+                        print(f"🎉 掌握度达标! 平均完成率 {avg_completion:.2%} >= {self.config.CURRICULUM_MASTERY_THRESHOLD:.0%}. 晋级到下一等级。")
                         break
-                    
-                    elif decision == Decision.TIMEOUT_PROMOTE:
-                        print(f"⏰ {decision_rationale}")
-                        current_level_index += 1
-                        break
-                    
-                    elif decision == Decision.TIMEOUT_CONTINUE:
-                        print(f"⚠️  {decision_rationale}")
-                        # 可以选择继续训练或强制晋级，这里选择强制晋级
-                        current_level_index += 1
-                        break
-                    
-                    elif decision == Decision.REGRESS:
-                        print(f"📉 {decision_rationale}")
-                        
-                        # 获取降级目标等级信息
-                        target_level_index = max(0, current_level_index - 1)
-                        target_scenario_name = curriculum_scenarios[target_level_index][1] if target_level_index < len(curriculum_scenarios) else "Unknown"
-                        
-                        # 处理降级操作
-                        regression_info = promotion_decider.handle_regression(scenario_name, target_scenario_name)
-                        
-                        # 输出降级统计信息
-                        regression_stats = promotion_decider.get_regression_statistics()
-                        print(f"   降级统计: {regression_stats['total_regressions']}/{regression_stats['max_allowed_regressions']} "
-                              f"(剩余: {regression_stats['remaining_regressions']})")
-                        
-                        # 更新等级索引
-                        current_level_index = target_level_index
-                        print(f"   降级到等级 {target_level_index + 1}: {target_scenario_name}")
-                        
-                        break
-                    
-                    # Decision.CONTINUE: 继续当前等级训练
-                    
-                    # 保存最优模型 (每50轮检查一次)
-                    if global_episode_counter % 50 == 0:
-                        if episode_reward > best_reward:
-                            best_reward = episode_reward
-                        self._save_best_model(solver.policy_net, global_episode_counter, episode_reward, scenario_name)
-                
-                # 等级完成后的详细摘要
-                final_summary = performance_monitor.get_performance_summary()
-                training_time = final_summary.get('training_time', 0.0)
-                
-                print(f"✅ 等级 {current_level_index + 1}/5 ({scenario_name}) 完成！")
-                print(f"   📊 训练统计:")
-                print(f"      - 训练轮次: {final_summary.get('episode_count', 0)}")
-                print(f"      - 训练时长: {training_time:.1f}秒")
-                print(f"      - 最终掌握度: {final_summary.get('mastery_score', 0.0):.3f}")
-                print(f"      - 最佳完成率: {final_summary.get('best_completion_rate', 0.0):.3f}")
-                print(f"      - 平均完成率: {final_summary.get('average_completion_rate', 0.0):.3f}")
-                
-                # 显示最近几轮的表现
-                recent_rates = final_summary.get('recent_completion_rates', [])
-                if recent_rates:
-                    recent_avg = sum(recent_rates) / len(recent_rates)
-                    print(f"      - 最近{len(recent_rates)}轮平均: {recent_avg:.3f}")
-                
-                # 显示决策原因
-                if decision in [Decision.PROMOTE, Decision.TIMEOUT_PROMOTE]:
-                    print(f"   🎯 晋级原因: {decision_rationale}")
-                elif decision == Decision.REGRESS:
-                    print(f"   📉 降级原因: {decision_rationale}")
-                
-                print()
-            
-            # 自适应课程训练完成摘要
-            total_training_time = time.time() - curriculum_start_time
-            print(f"\n🏆 自适应课程训练完成！")
-            print(f"   📈 整体统计:")
-            print(f"      - 总训练轮次: {global_episode_counter}")
-            print(f"      - 完成等级数: {len(curriculum_scenarios)}")
-            print(f"      - 总训练时长: {total_training_time:.1f}秒")
-            print(f"      - 平均每轮用时: {total_training_time/global_episode_counter:.2f}秒")
-            
-            # 显示降级统计
-            regression_stats = promotion_decider.get_regression_statistics()
-            if regression_stats['total_regressions'] > 0:
-                print(f"      - 总降级次数: {regression_stats['total_regressions']}")
-            
-            # 保存最终模型
-            self._save_best_model(solver.policy_net, global_episode_counter, best_reward, "adaptive_final")
-            
-            # 打印各等级历史摘要
-            level_history = performance_monitor.get_level_history_summary()
-            if level_history:
-                print(f"\n   📋 各等级训练历史:")
-                for i, level_summary in enumerate(level_history):
-                    print(f"      等级{i+1} ({level_summary['level_name']}): "
-                          f"轮次={level_summary['episode_count']}, "
-                          f"掌握度={level_summary['average_completion_rate']:.3f}, "
-                          f"用时={level_summary['training_time']:.1f}s")
-            history_summary = performance_monitor.get_level_history_summary()
-            if history_summary:
-                print(f"\n📈 等级历史摘要:")
-                for i, level_summary in enumerate(history_summary):
-                    print(f"   等级 {i+1} ({level_summary['level_name']}): "
-                          f"轮次={level_summary['episode_count']}, "
-                          f"掌握度={level_summary['average_completion_rate']:.3f}, "
-                          f"已掌握={level_summary['is_mastered']}")
-            
-        except Exception as e:
-            print(f"❌ 自适应课程训练出错: {e}")
-            import traceback
-            traceback.print_exc()
-            raise AdaptiveCurriculumError(f"自适应课程训练失败: {e}")
-    
+
+            # --- 2.4. 等级训练结束总结 ---
+            level_duration = time.time() - level_start_time
+            print(f"--- 等级 {scenario_name} 训练结束 (耗时: {level_duration:.1f}s) ---")
+            if episode_in_level == max_episodes_per_level - 1:
+                print(f"⚠️  已达到最大训练轮次 {max_episodes_per_level}，强制晋级。")
+
+            if episode_reward > best_reward:
+                best_reward = episode_reward
+            self._save_best_model(solver.policy_net, global_episode_counter, best_reward, scenario_name)
+
+        total_training_time = time.time() - curriculum_start_time
+        print(f"\n🏆 所有课程学习等级已完成！(总耗时: {total_training_time:.1f}s)")
+        
     def _traditional_curriculum_training_graph(self) -> None:
         """传统课程学习训练 - 固定轮次训练（原有实现）"""
         

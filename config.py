@@ -136,7 +136,7 @@ class Config:
         
         # ----- 分级日志输出控制配置 -----
         # 日志输出级别控制 ('minimal', 'simple', 'detailed', 'debug')
-        self.LOG_LEVEL =  'simple'# 'detailed'#                     # 默认简洁模式
+        self.LOG_LEVEL = 'simple'# 'detailed'#                      # 默认简洁模式
         self.LOG_EPISODE_DETAIL = False                # 是否输出轮次内步的详细信息
         self.LOG_REWARD_DETAIL = False                  # 是否输出奖励分解详细信息
         
@@ -265,11 +265,7 @@ class Config:
         
         # ----- 自适应课程训练参数 -----
         # 自适应课程训练功能开关和核心参数
-        self.CURRICULUM_ENABLE_ADAPTIVE = True          # 启用自适应课程训练机制
-        self.CURRICULUM_MASTERY_THRESHOLD = 0.80        # 课程掌握度阈值，达到此完成率视为掌握
-        self.CURRICULUM_PERFORMANCE_WINDOW = 20         # 性能评估滑动窗口大小
-        self.CURRICULUM_MAX_EPISODES_PER_LEVEL = 500    # 单个难度等级最大训练轮次
-        self.CURRICULUM_MIN_EPISODES_PER_LEVEL = 10     # 单个难度等级最小训练轮次
+        self.CURRICULUM_ENABLE_ADAPTIVE = True          # 启用自适应课程训练机制   
         
         # 高级自适应参数
         self.CURRICULUM_REGRESSION_THRESHOLD = 0.40     # 课程退步阈值，低于此值考虑降级
@@ -281,7 +277,27 @@ class Config:
         self.CURRICULUM_LOG_DETAILED_PERFORMANCE = True # 记录详细的性能数据
         self.CURRICULUM_SAVE_LEVEL_CHECKPOINTS = True   # 保存每个等级的检查点
         self.CURRICULUM_PERFORMANCE_SMOOTHING = 0.1     # 性能指标平滑系数
+        # ----- 渐进式自适应课程学习 (Granular Adaptive Curriculum) -----
+        # 精细化课程训练参数
+        self.CURRICULUM_USE_GRANULAR_PROGRESSION = True  # True: 启用渐进式课程, False: 使用原有模板
+        self.GRANULAR_CURRICULUM_LEVELS = 15  #3             # 课程的总等级数量
+        self.CURRICULUM_MASTERY_THRESHOLD = 0.85 # 0.50        # 课程掌握度阈值，达到此完成率视为掌握
+        self.CURRICULUM_PERFORMANCE_WINDOW = 20  # 5         # 性能评估滑动窗口大小
+        self.CURRICULUM_MAX_EPISODES_PER_LEVEL = 500 # 20    # 单个难度等级最大训练轮次
+        self.CURRICULUM_MIN_EPISODES_PER_LEVEL = 10 # 3     # 单个难度等级最小训练轮次
         
+        
+        # --- 课程起点参数 ---
+        self.GRANULAR_START_UAVS = 3                     # 起始UAV数量
+        self.GRANULAR_START_TARGETS = 2                  # 起始目标数量
+        self.GRANULAR_START_OBSTACLES = 1                # 起始障碍物数量
+        self.GRANULAR_START_ABUNDANCE = 1.5              # 起始资源充裕度 (1.5倍需求)
+
+        # --- 课程终点参数 (将直接从全局配置读取 MAX_UAVS 和 MAX_TARGETS) ---
+        self.GRANULAR_END_OBSTACLES = 20                 # 最终障碍物数量
+        self.GRANULAR_END_ABUNDANCE = 1.0                # 最终资源充裕度 (1.0倍需求)  
+        # ----- 渐进式自适应课程学习 (Granular Adaptive Curriculum) -----
+              
         # ----- 模拟与评估参数 -----
         # 可视化控制：
         self.SHOW_VISUALIZATION = False     # 是否显示matplotlib可视化图表
