@@ -1,0 +1,26 @@
+{
+    "mcpServers": {
+      "filesystem": {
+        "command": "C:\\Users\\zxq\\anaconda3\\envs\\torch\\python.exe",
+        "args": ["-u", "G:\\studyDev\\uav-task-path-planning\\mcp_fs.py"],
+        "cwd": "G:\\studyDev\\uav-task-path-planning",
+        "disabled": false,
+        "autoApprove": [
+          "read_file",
+          "read_multiple_files",
+          "write_file",
+          "create_file",
+          "create_directory",
+          "list_directory",
+          "delete_file",
+          "delete_directory",
+          "move_file",
+          "copy_file",
+          "get_file_info",
+          "search_files",
+          "edit_file",
+          "*"
+        ]
+      }
+    }
+  }
