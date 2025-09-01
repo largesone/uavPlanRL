@@ -136,7 +136,7 @@ class Config:
         
         # ----- 分级日志输出控制配置 -----
         # 日志输出级别控制 ('minimal', 'simple', 'detailed', 'debug')
-        self.LOG_LEVEL = 'simple'                      # 默认简洁模式
+        self.LOG_LEVEL =  'simple'# 'detailed'#                     # 默认简洁模式
         self.LOG_EPISODE_DETAIL = False                # 是否输出轮次内步的详细信息
         self.LOG_REWARD_DETAIL = False                  # 是否输出奖励分解详细信息
         
@@ -241,7 +241,7 @@ class Config:
         self.CRITICAL_UAV_MIN_THRESHOLD = 2
         self.CRITICAL_UAV_SCALING_FACTOR = 0.15
 
-        # [新增] 统一的、分级的场景生成模板
+        # 统一的、分级的场景生成模板
         self.SCENARIO_TEMPLATES = {
             'easy': {
                 'uav_num_range': (3, 7),
@@ -380,7 +380,7 @@ class Config:
             self.LOG_EPISODE_DETAIL = True
             self.LOG_REWARD_DETAIL = False
             self.ENABLE_DEBUG = False
-            self.ENABLE_SCENARIO_DEBUG = False
+            self.ENABLE_SCENARIO_DEBUG = True
         elif self.LOG_LEVEL == 'detailed':
             self.LOG_EPISODE_DETAIL = True
             self.LOG_REWARD_DETAIL = True

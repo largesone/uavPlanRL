@@ -54,7 +54,7 @@ class ModelTrainer:
             print(f"创建场景记录目录: {self.scenario_log_dir}")
     
     def save_scenario_data(self, episode: int, uavs, targets, obstacles, scenario_name: str = "dynamic", 
-                          inference_result: Dict = None, solver=None, completion_rate: float = None):
+                          inference_result: Dict = None, solver=None, completion_rate: float = None, episode_info: Dict = None): 
         """
         保存轮次场景数据到单独文件 - 支持多种格式，包含推理结果和成功率信息
         
@@ -72,9 +72,13 @@ class ModelTrainer:
         if not getattr(self.config, 'SAVE_SCENARIO_DATA', True):
             return
         
-        try:
-            # 获取推理结果（如果未提供且有solver实例）
-            if inference_result is None and solver is not None:
+        try:            
+            # --- 修改推理结果的获取逻辑 ---
+            if episode_info:
+                # 优先使用基于动作序列的报告生成
+                inference_result = self._generate_report_from_actions(episode_info, uavs, targets)
+            elif inference_result is None and solver is not None:
+                # 保持原来的逻辑作为后备
                 inference_result = self._capture_episode_inference_result(solver, uavs, targets, obstacles, completion_rate)
             
             # 创建场景数据字典
@@ -452,6 +456,79 @@ class ModelTrainer:
         except Exception as e:
             print(f"[ERROR] 资源充裕度计算失败: {e}")
             return f"资源充裕度: [计算错误: {e}]"
+
+    def _validate_scenario_consistency(self, solver, scenario_name: str, episode: int):
+        """
+        【新增】验证场景数据一致性，确保所有组件使用相同的场景信息
+        
+        Args:
+            solver: 求解器对象
+            scenario_name: 场景名称
+            episode: 当前轮次
+        """
+        try:
+            if not hasattr(solver, 'env') or not hasattr(solver.env, 'uavs'):
+                return
+            
+            actual_uavs = len(solver.env.uavs)
+            actual_targets = len(solver.env.targets)
+            actual_obstacles = len(solver.env.obstacles) if hasattr(solver.env, 'obstacles') else 0
+            
+            # 获取预期范围
+            if scenario_name in self.config.SCENARIO_TEMPLATES:
+                expected_ranges = self.config.SCENARIO_TEMPLATES[scenario_name]
+                uav_range = expected_ranges['uav_num_range']
+                target_range = expected_ranges['target_num_range']
+                obstacle_range = expected_ranges['obstacle_num_range']
+                
+                # 验证数量是否在预期范围内
+                inconsistencies = []
+                
+                if not (uav_range[0] <= actual_uavs <= uav_range[1]):
+                    inconsistencies.append(f"无人机数量不一致: 实际={actual_uavs}, 预期范围={uav_range}")
+                
+                if not (target_range[0] <= actual_targets <= target_range[1]):
+                    inconsistencies.append(f"目标数量不一致: 实际={actual_targets}, 预期范围={target_range}")
+                
+                if not (obstacle_range[0] <= actual_obstacles <= obstacle_range[1]):
+                    inconsistencies.append(f"障碍物数量不一致: 实际={actual_obstacles}, 预期范围={obstacle_range}")
+                
+                # 输出不一致信息
+                if inconsistencies:
+                    print(f"⚠️ Episode {episode} 场景数据不一致:")
+                    for issue in inconsistencies:
+                        print(f"   {issue}")
+                else:
+                    if getattr(self.config, 'ENABLE_SCENARIO_DEBUG', False):
+                        print(f"✅ Episode {episode} 场景数据一致性验证通过: UAV={actual_uavs}, 目标={actual_targets}, 障碍={actual_obstacles}")
+            
+        except Exception as e:
+            print(f"⚠️ 场景一致性验证失败: {e}")
+
+    def _ensure_single_reset_per_episode(self, solver, scenario_name: str, episode: int):
+        """
+        【修复】确保每个轮次只重置一次场景 - 仅验证，不执行额外重置
+        
+        Args:
+            solver: 求解器对象
+            scenario_name: 场景名称
+            episode: 当前轮次
+        """
+        try:
+            if not hasattr(solver, 'env'):
+                return
+            
+            # 仅检查重置状态，不执行额外重置
+            last_reset_episode = getattr(solver.env, '_last_reset_episode', -1)
+            
+            if getattr(self.config, 'ENABLE_SCENARIO_DEBUG', False):
+                if last_reset_episode == episode:
+                    print(f"[RESET DEBUG] Episode {episode} 重置状态正常")
+                else:
+                    print(f"[RESET DEBUG] Episode {episode} 重置状态异常: 上次重置轮次={last_reset_episode}")
+            
+        except Exception as e:
+            print(f"⚠️ 场景重置状态检查失败: {e}")
 
     def _calculate_resource_summary(self, task_assignments, uavs, targets):
         """计算资源满足度的摘要信息"""
@@ -1144,8 +1221,9 @@ class ModelTrainer:
     def _log_episode_reward(self, episode: int, total_episodes: int, step_count: int, 
                            episode_reward: float, base_reward: float, shaping_reward: float,
                            completion_rate: float, exploration_rate: float, elapsed_time: float,
-                           detailed_info: Dict = None, uavs=None, targets=None, obstacles=None):
-        """记录单轮奖励信息到日志文件（不输出到控制台，避免重复）"""
+                           detailed_info: Dict = None, uavs=None, targets=None, obstacles=None,
+                           scenario_name: str = None, solver=None):
+        """【修复】记录单轮奖励信息到日志文件，确保使用统一的场景数据源"""
         # 奖励日志记录
         if hasattr(self, 'reward_logger'):
             # 防止除零错误：如果total_episodes为0（自适应课程训练），使用当前轮次作为进度
@@ -1155,10 +1233,18 @@ class ModelTrainer:
                 progress_pct = episode + 1  # 自适应课程训练中显示当前轮次
             path_algo = "高精度PH-RRT" if self.config.USE_PHRRT_DURING_TRAINING else "快速近似"
             
-            # 获取场景数据信息 - 确保有默认值
-            num_uavs = len(uavs) if uavs is not None else 0
-            num_targets = len(targets) if targets is not None else 0
-            num_obstacles = len(obstacles) if obstacles is not None else 0
+            # 【修复】优先使用实际环境中的场景数据，确保数据一致性
+            if solver and hasattr(solver, 'env'):
+                actual_uavs = len(solver.env.uavs) if hasattr(solver.env, 'uavs') else 0
+                actual_targets = len(solver.env.targets) if hasattr(solver.env, 'targets') else 0
+                actual_obstacles = len(solver.env.obstacles) if hasattr(solver.env, 'obstacles') else 0
+                actual_scenario_name = getattr(solver.env, '_current_scenario_name', scenario_name or 'unknown')
+            else:
+                # 后备方案：使用传入的场景数据
+                actual_uavs = len(uavs) if uavs is not None else 0
+                actual_targets = len(targets) if targets is not None else 0
+                actual_obstacles = len(obstacles) if obstacles is not None else 0
+                actual_scenario_name = scenario_name or 'unknown'
             
             # 确定训练模式
             training_mode = "课程学习" if hasattr(self, '_is_curriculum') and self._is_curriculum else "随机训练"
@@ -1167,8 +1253,8 @@ class ModelTrainer:
             resource_abundance_info = self._calculate_resource_abundance(uavs, targets)
             
             try:
-                self.reward_logger.info(f"Episode {episode + 1:6d}/{total_episodes:d} ({progress_pct:5.1f}%) [{path_algo}|{training_mode}]: "
-                                       f"无人机={num_uavs}, 目标={num_targets}, 障碍={num_obstacles}, "
+                self.reward_logger.info(f"Episode {episode + 1:6d}/{total_episodes:d} ({progress_pct:5.1f}%) [{actual_scenario_name}|{path_algo}|{training_mode}]: "
+                                       f"无人机={actual_uavs}, 目标={actual_targets}, 障碍={actual_obstacles}, "
                                        f"{resource_abundance_info}, "
                                        f"步数={step_count:2d}, 总奖励={episode_reward:7.1f}, 基础奖励={base_reward:6.1f}, "
                                        f"塑形奖励={shaping_reward:6.1f}, 势能=0.000, 完成率={completion_rate:.3f}, "
@@ -1177,7 +1263,7 @@ class ModelTrainer:
                 print(f"[WARNING] 轮次奖励记录失败: {e}")
                 # 尝试简单的日志记录作为备用
                 try:
-                    self.reward_logger.info(f"Episode {episode + 1}/{total_episodes}: 无人机={num_uavs}, 目标={num_targets}, 障碍={num_obstacles}, {resource_abundance_info}, 奖励={episode_reward:.1f}, 完成率={completion_rate:.3f}")
+                    self.reward_logger.info(f"Episode {episode + 1}/{total_episodes}: 场景={actual_scenario_name}, 无人机={actual_uavs}, 目标={actual_targets}, 障碍={actual_obstacles}, {resource_abundance_info}, 奖励={episode_reward:.1f}, 完成率={completion_rate:.3f}")
                 except Exception as backup_error:
                     print(f"备用轮次日志记录也失败: {backup_error}")
         else:
@@ -1585,6 +1671,14 @@ class ModelTrainer:
             obs_mode = "graph"
             i_dim = 64
             o_dim = len(targets) * len(uavs) * graph.n_phi
+
+            if o_dim <= 0 and scenario_name in ["easy", "medium", "hard"]:
+                # 如果是动态场景且初始为空，则使用配置中的最大实体数来创建网络
+                # 这样可以确保网络能够处理后续生成的任何规模的场景
+                max_o_dim = self.config.MAX_TARGETS * self.config.MAX_UAVS * self.config.GRAPH_N_PHI
+                o_dim = max_o_dim
+                print(f"动态场景初始化：使用最大动作空间占位符 o_dim={o_dim}")            
+
         else:
             obs_mode = "flat"
             target_dim = 7 * len(targets)
@@ -1689,22 +1783,32 @@ class ModelTrainer:
             num_targets = len(targets)
             num_obstacles = len(obstacles) if obstacles else 0
             
-            # 显示简化的场景信息（避免复杂的初始状态计算）
-            print(f"Episode {episode + 1:4d}/{total_episodes} ({progress_pct:5.1f}%) [简单奖励|{path_algo}]: "
-                  f"无人机={num_uavs}, 目标={num_targets}, 障碍={num_obstacles}, "
+            # 【修复】使用实际环境中的场景数据，确保数据一致性
+            actual_uavs = len(solver.env.uavs) if hasattr(solver.env, 'uavs') else num_uavs
+            actual_targets = len(solver.env.targets) if hasattr(solver.env, 'targets') else num_targets
+            actual_obstacles = len(solver.env.obstacles) if hasattr(solver.env, 'obstacles') else num_obstacles
+            
+            # 获取实际场景名称
+            actual_scenario_name = getattr(solver.env, '_current_scenario_name', scenario_name)
+            
+            print(f"Episode {episode + 1:4d}/{total_episodes} ({progress_pct:5.1f}%) [{actual_scenario_name}|{path_algo}]: "
+                  f"无人机={actual_uavs}, 目标={actual_targets}, 障碍={actual_obstacles}, "
                   f"步数={detailed_info['step_count']:2d}, "
                   f"总奖励={episode_reward:7.1f}, "
                   f"完成率={completion_rate:.3f}, "
                   f"探索率={exploration_rate:.3f}, "
                   f"用时={episode_elapsed:.1f}s")
             
-            # 记录奖励信息 - 确保传递场景信息
+            # 【修复】记录奖励信息 - 传递solver确保使用实际环境数据
             self._log_episode_reward(
                 episode, total_episodes, detailed_info['step_count'],
                 episode_reward, total_base_reward, total_shaping_reward,
                 completion_rate, exploration_rate, episode_elapsed, detailed_info,
-                uavs, targets, obstacles
+                uavs, targets, obstacles, actual_scenario_name, solver
             )
+            
+            # 【新增】验证场景数据一致性
+            self._validate_scenario_consistency(solver, actual_scenario_name, episode)
             
             # 【修复】在训练完成后保存场景数据，确保使用正确的完成率
             # 只在指定间隔记录推理结果，避免过多文件
@@ -1797,7 +1901,7 @@ class ModelTrainer:
                 progress_pct = global_episode_counter / total_episodes * 100
                 path_algo = "高精度PH-RRT" if self.config.USE_PHRRT_DURING_TRAINING else "快速近似"
                 
-                # 增强的场景信息输出
+                # 【修复】增强的场景信息输出 - 课程学习模式使用预设场景数据
                 print(f"Episode {global_episode_counter:4d}/{total_episodes} ({progress_pct:5.1f}%) [{scenario_name}|{path_algo}]: "
                       f"UAV={len(uavs):2d} 目标={len(targets):2d} 障碍={len(obstacles):2d}, "
                       f"步数={detailed_info['step_count']:2d}, "
@@ -1811,7 +1915,7 @@ class ModelTrainer:
                     detailed_info.get('total_shaping_reward', episode_reward * 0.2),
                     completion_rate, detailed_info.get('exploration_rate', 0.1), 
                     detailed_info.get('episode_time', 0.0), detailed_info,
-                    uavs, targets, obstacles
+                    uavs, targets, obstacles, scenario_name, None  # 传统课程训练没有solver对象
                 )
                 
                 # 【修复】在训练完成后保存场景数据，确保使用正确的完成率
@@ -1998,8 +2102,13 @@ class ModelTrainer:
                     total_base_reward = detailed_info.get('total_base_reward', episode_reward * 0.8)
                     total_shaping_reward = detailed_info.get('total_shaping_reward', episode_reward * 0.2)
                     
+                    # 【修复】使用实际环境中的场景数据，确保数据一致性
+                    actual_uavs = len(solver.env.uavs) if hasattr(solver, 'env') and hasattr(solver.env, 'uavs') else len(uavs)
+                    actual_targets = len(solver.env.targets) if hasattr(solver, 'env') and hasattr(solver.env, 'targets') else len(targets)
+                    actual_obstacles = len(solver.env.obstacles) if hasattr(solver, 'env') and hasattr(solver.env, 'obstacles') else len(obstacles)
+                    
                     print(f"Episode {global_episode_counter:4d} [{scenario_name}|{path_algo}]: "
-                          f"无人机={len(uavs)}, 目标={len(targets)}, 障碍={len(obstacles)}, "
+                          f"无人机={actual_uavs}, 目标={actual_targets}, 障碍={actual_obstacles}, "
                           f"{resource_abundance_info}, "
                           f"步数={detailed_info['step_count']:2d}, "
                           f"总奖励={episode_reward:7.1f}, "
@@ -2015,8 +2124,11 @@ class ModelTrainer:
                         global_episode_counter - 1, 0, detailed_info['step_count'],  # total_episodes设为0，因为是动态的
                         episode_reward, total_base_reward, total_shaping_reward,
                         completion_rate, solver.epsilon, episode_elapsed, detailed_info,
-                        uavs, targets, obstacles
+                        uavs, targets, obstacles, scenario_name, solver
                     )
+                    
+                    # 【新增】验证场景数据一致性
+                    self._validate_scenario_consistency(solver, scenario_name, global_episode_counter - 1)
                     
                     # 【修复】在训练完成后保存场景数据，确保使用正确的完成率
                     should_log_inference = (global_episode_counter % self.config.EPISODE_INFERENCE_LOG_INTERVAL == 0)
@@ -2211,7 +2323,7 @@ class ModelTrainer:
                 # 获取路径算法信息
                 path_algo = "高精度PH-RRT" if self.config.USE_PHRRT_DURING_TRAINING else "快速近似"
                 
-                # 增强的场景信息输出
+                # 【修复】增强的场景信息输出 - 课程学习模式使用预设场景数据
                 print(f"Episode {global_episode_counter:4d}/{total_episodes} ({progress_pct:5.1f}%) [{scenario_name}|{path_algo}]: "
                       f"UAV={len(uavs):2d} 目标={len(targets):2d} 障碍={len(obstacles):2d}, "
                       f"步数={detailed_info['step_count']:2d}, "
@@ -2225,8 +2337,11 @@ class ModelTrainer:
                     episode_reward, detailed_info.get('total_base_reward', episode_reward * 0.8), 
                     detailed_info.get('total_shaping_reward', episode_reward * 0.2),
                     completion_rate, solver.epsilon, detailed_info.get('episode_time', 0.0), detailed_info,
-                    uavs, targets, obstacles
+                    uavs, targets, obstacles, scenario_name, solver
                 )
+                
+                # 【新增】验证场景数据一致性
+                self._validate_scenario_consistency(solver, scenario_name, global_episode_counter - 1)
                 
                 # 保存最优模型 (每50轮检查一次，或者在训练结束时检查)
                 if global_episode_counter % 50 == 0 or global_episode_counter == total_episodes:
@@ -2441,12 +2556,13 @@ class ModelTrainer:
         elif scenario_name in ["easy", "medium", "hard"]:
             # 对于动态场景，使用环境的动态生成功能
             print(f"使用动态随机{scenario_name}场景")
-            # 创建临时环境来生成动态场景
-            from environment import UAVTaskEnv
-            # 直接创建临时环境，让环境内部处理图创建
-            temp_env = UAVTaskEnv([], [], None, [], self.config, obs_mode="graph")
-            temp_env._initialize_entities(scenario_name)
-            uavs, targets, obstacles = temp_env.uavs, temp_env.targets, temp_env.obstacles
+            uavs, targets, obstacles = [], [], []
+            # # 创建临时环境来生成动态场景
+            # from environment import UAVTaskEnv
+            # # 直接创建临时环境，让环境内部处理图创建
+            # temp_env = UAVTaskEnv([], [], None, [], self.config, obs_mode="graph")
+            # temp_env._initialize_entities(scenario_name)
+            # uavs, targets, obstacles = temp_env.uavs, temp_env.targets, temp_env.obstacles
         else:
             print(f"⚠️ 未知场景名称: {scenario_name}，使用默认small场景")
             uavs, targets, obstacles = get_small_scenario(obstacle_tolerance=50.0)
@@ -2461,9 +2577,23 @@ class ModelTrainer:
         i_dim = 64  # ZeroShotGNN固定输入维度
         o_dim = len(targets) * len(uavs) * graph.n_phi
         
+        if o_dim <= 0 and scenario_name in ["easy", "medium", "hard"]:
+            # 如果是动态场景且初始为空，则使用配置中的最大实体数来创建网络
+            # 这样可以确保网络能够处理后续生成的任何规模的场景
+            max_o_dim = self.config.MAX_TARGETS * self.config.MAX_UAVS * self.config.GRAPH_N_PHI
+            o_dim = max_o_dim
+            print(f"动态场景初始化：使用最大动作空间占位符 o_dim={o_dim}")
+
         # 创建求解器
         solver = GraphRLSolver(uavs, targets, graph, obstacles, i_dim, 
                               [self.config.hyperparameters.hidden_dim], o_dim, self.config, obs_mode="graph")
+        
+        # 【修复】确保环境已正确设置场景数据，避免重复生成
+        solver.env.uavs = uavs
+        solver.env.targets = targets
+        solver.env.obstacles = obstacles
+        solver.env._scenario_initialized = True
+        solver.env._current_scenario_name = scenario_name
         
         # 设置步骤日志记录器
         solver.step_logger = self.log_step_reward
@@ -2485,7 +2615,7 @@ class ModelTrainer:
         print(f"Graph训练参数: episodes={episodes}, patience={patience}, log_interval={log_interval}", flush=True)
         
         # 记录每轮奖励与完成率
-        def _record(ep, rew, comp):
+        def _record(ep, rew, comp, episode_info):
             """记录每轮训练结果"""
             # 记录统计
             self.training_stats['episode_rewards'].append(rew)
@@ -2494,12 +2624,24 @@ class ModelTrainer:
             # 【修复】在训练结束后记录包含正确完成率的场景数据
             # 只有在训练完成后才保存场景数据，确保使用的是最终状态的完成率
             should_log_inference = (ep % self.config.EPISODE_INFERENCE_LOG_INTERVAL == 0)
-            if should_log_inference:
-                self.save_scenario_data(ep, solver.env.uavs, solver.env.targets, solver.env.obstacles, 
-                                      scenario_name, solver=solver, completion_rate=comp)
+            
+            # 【修复】安全处理episode_info参数
+            if episode_info is None:
+                episode_info = {}
+            
+            # 从 solver 的回调信息中获取最新的环境，而不是使用 trainer 中陈旧的 self.env
+            final_env = episode_info.get('final_env')
+            if final_env:
+                uavs, targets, obstacles = final_env.uavs, final_env.targets, final_env.obstacles
             else:
-                self.save_scenario_data(ep, solver.env.uavs, solver.env.targets, solver.env.obstacles, 
-                                      scenario_name, completion_rate=comp)
+                uavs, targets, obstacles = [], [], [] # 安全回退，理论上不应触发
+
+            if should_log_inference:
+                self.save_scenario_data(ep, uavs, targets, obstacles, 
+                                      scenario_name, solver=solver, completion_rate=comp, episode_info=episode_info)
+            else:
+                self.save_scenario_data(ep, uavs, targets, obstacles, 
+                                      scenario_name, completion_rate=comp, episode_info=episode_info)
             
             # 收集损失数据（从solver获取最近的损失）
             episode_loss = 0.0
@@ -2547,12 +2689,17 @@ class ModelTrainer:
                     }
                     
                     # 调用包含资源充裕度信息的日志记录方法
+                    actual_scenario_name = getattr(solver.env, '_current_scenario_name', scenario_name)
                     self._log_episode_reward(
                         ep - 1, episodes, step_counter,  # episode从0开始索引
                         rew, total_base_reward, total_shaping_reward,
                         comp, solver.epsilon, episode_elapsed, detailed_info,
-                        solver.env.uavs, solver.env.targets, solver.env.obstacles
+                        solver.env.uavs, solver.env.targets, solver.env.obstacles,
+                        actual_scenario_name, solver
                     )
+                    
+                    # 【新增】验证场景数据一致性
+                    self._validate_scenario_consistency(solver, actual_scenario_name, ep - 1)
                     
                     # 记录详细的奖励分解 - 按照main-old.py格式，不换行
                     if breakdown:
@@ -2597,10 +2744,10 @@ class ModelTrainer:
                 self._save_best_model(solver.policy_net, ep, rew, scenario_name)
         
         # 在训练开始前记录初始场景状态（修复：确保记录的是训练前的原始状态）
-        def _record_initial_and_training(ep, rew, comp):
+        def _record_initial_and_training(ep, rew, comp, episode_info=None):
             """训练前记录初始场景，训练后记录统计"""
             # 训练完成后的统计记录
-            _record(ep, rew, comp)
+            _record(ep, rew, comp, episode_info) # <--- 修改点：传递 episode_info
         
         # 创建场景数据记录的回调函数，在每轮训练开始前调用
         def _record_scenario_before_training(episode_idx):
@@ -2628,10 +2775,56 @@ class ModelTrainer:
         
         # 传递场景记录回调给训练方法
         solver.train(episodes, patience, log_interval, model_save_path, 
-                    on_episode_end=_record_initial_and_training, 
+                    on_episode_end=_record_initial_and_training, # <--- 确保这里使用的是修改后的函数
                     on_episode_start=_record_scenario_before_training,
                     scenario_name=scenario_name)
-    
+
+    def _generate_report_from_actions(self, episode_info: Dict, uavs, targets) -> Dict:
+        """
+        根据记录的动作序列生成推理结果报告，替代完整的模拟推理。
+        """
+        try:
+            action_sequence = episode_info.get('action_sequence', [])
+            final_env = episode_info.get('final_env')
+            
+            if not action_sequence or not final_env:
+                return {}
+
+            # 从动作序列重建任务分配
+            task_assignments = {uav.id: [] for uav in uavs}
+            n_uavs = len(uavs)
+            n_targets = len(targets)
+            n_phi = self.config.GRAPH_N_PHI
+
+            for step, action_idx in enumerate(action_sequence):
+                if n_uavs > 0 and n_targets > 0 and n_phi > 0:
+                    target_idx = action_idx // (n_uavs * n_phi)
+                    uav_idx = (action_idx % (n_uavs * n_phi)) // n_phi
+                    
+                    if target_idx < n_targets and uav_idx < n_uavs:
+                        target_id = targets[target_idx].id
+                        uav_id = uavs[uav_idx].id
+                        task_assignments[uav_id].append((target_id, 0)) # phi_idx 暂时忽略
+
+            # 使用最终的环境状态来生成报告
+            report = self._generate_detailed_inference_report(task_assignments, final_env.uavs, final_env.targets)
+            summary = self._generate_allocation_summary(task_assignments, final_env.uavs, final_env.targets)
+
+            return {
+                'task_allocation': {
+                    'assignments': task_assignments,
+                    'total_assignments': summary.get('total_assignments', 0),
+                    'active_uav_count': summary.get('active_uav_count', 0),
+                    'assigned_target_count': summary.get('assigned_target_count', 0),
+                    'target_coverage_rate': summary.get('target_coverage_rate', 0.0)
+                },
+                'detailed_report': report,
+                'capture_timestamp': datetime.now().isoformat()
+            }
+        except Exception as e:
+            print(f"从动作序列生成报告失败: {e}")
+            return {'error_message': str(e)}
+
     def _save_training_results(self):
         """保存训练结果 - 完整版本，包含从main-old.py迁移的功能"""
         output_dir = "output"

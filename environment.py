@@ -22,6 +22,18 @@ class DirectedGraph:
         self.uavs, self.targets, self.config = uavs, targets, config
         self.n_phi = n_phi
         self.n_uavs, self.n_targets = len(uavs), len(targets)
+
+        if self.n_uavs == 0 and self.n_targets == 0:
+            self.uav_positions = np.empty((0, 2))
+            self.target_positions = np.empty((0, 2))
+            self.nodes = []
+            self.node_positions = np.empty((0, 2))
+            self.node_map = {}
+            self.dist_matrix = np.empty((0, 0))
+            self.adj_matrix = np.empty((0, 0))
+            self.phi_matrix = np.empty((0, 0))
+            return  # 提前退出，不再执行后续计算        
+
         self.uav_positions = np.array([u.position for u in uavs])
         self.target_positions = np.array([t.position for t in targets])
         
@@ -257,42 +269,104 @@ class UAVTaskEnv(gym.Env):
                 )
             })
         })
+    def _update_action_space(self):
+        """【新增】根据当前实体更新动作空间大小的辅助函数"""
+        if self.graph is not None:
+            self.n_actions = len(self.targets) * len(self.uavs) * self.graph.n_phi
+        else:
+            self.n_actions = len(self.targets) * len(self.uavs) * 1
         
+        if self.n_actions <= 0:
+            self.n_actions = 1 # 默认最小动作空间
+
+        self.action_space = spaces.Discrete(self.n_actions)
+
+        self.max_steps = len(self.targets) * len(self.uavs) * 2
+
+        if getattr(self.config, 'ENABLE_SCENARIO_DEBUG', False):
+            print(f"[RESET DEBUG] Action space updated to size: {self.n_actions}")        
+
+
     def reset(self, seed=None, options=None):
         """
         重置环境到一个新的初始状态。
         - 如果提供了 'scenario' 选项（来自课程学习），则加载该预设场景。
         - 否则，根据 'scenario_name' 选项（来自动态模式）动态生成一个新场景。
         """
-        # 打印重置调试信息 - 受ENABLE_DEBUG控制
-        if getattr(self.config, 'ENABLE_DEBUG', True):
-            print("--- EXECUTING THE NEW, 重置场景 (VERSION 2025.08.25) ---")
+        # 【修复】防止同一轮次多次重置 - 改进版本
+        requested_episode = options.get('episode', -1) if options else -1
+        
+        # 【修复】只有在明确要求跳过重置时才跳过，否则允许正常重置
+        skip_reset = options.get('skip_reset', False) if options else False
+        if skip_reset:
+            return self._get_state(), self._get_info()
+        
+        # 如果有轮次信息且已经重置过相同轮次，则跳过（但允许强制重置）
+        force_reset = options.get('force_reset', False) if options else False
+        if (requested_episode != -1 and 
+            hasattr(self, '_last_reset_episode') and 
+            self._last_reset_episode == requested_episode and 
+            not force_reset):
+            # 静默跳过重复重置，不输出调试信息减少日志噪音
+            return self._get_state(), self._get_info()
+        
+        # 如果没有轮次信息，使用调用计数防止短时间内多次重置
+        if not hasattr(self, '_reset_call_count'):
+            self._reset_call_count = 0
+            self._last_reset_time = 0
+        
+        import time
+        current_time = time.time()
+        
+        # 如果在很短时间内（0.1秒）多次调用reset，跳过后续调用
+        if (current_time - self._last_reset_time < 0.1 and 
+            self._reset_call_count > 0 and 
+            requested_episode == -1):
+            # 静默跳过短时间重复重置，减少日志噪音
+            return self._get_state(), self._get_info()
+        
+        self._reset_call_count += 1
+        self._last_reset_time = current_time
+        
+        # 打印重置调试信息 - 受ENABLE_DEBUG控制，支持静默重置
+        silent_reset = options.get('silent_reset', False) if options else False
+        if getattr(self.config, 'ENABLE_DEBUG', True) and not silent_reset:
+            print(f"--- 重置场景 (轮次: {requested_episode}) ---")
 
         super().reset(seed=seed)
 
-        # 【修复】优先使用传入的scenario_name，如果没有则使用实例属性，最后才fallback到默认值
-        scenario_name = 'easy'  # 修改默认值为easy而不是medium
+        # 【修复】优先使用传入的scenario_name，确保使用正确的场景级别
+        scenario_name = 'hard'  # 默认使用hard模式，与配置保持一致
         
         # 首先检查options参数
         if options and 'scenario_name' in options:
             scenario_name = options['scenario_name']
-            if getattr(self.config, 'ENABLE_SCENARIO_DEBUG', False) and getattr(self.config, 'ENABLE_DEBUG', True):
+            if getattr(self.config, 'ENABLE_SCENARIO_DEBUG', False):
                 print(f"[RESET DEBUG] 使用options中的场景名称: {scenario_name}")
         # 其次检查环境实例是否有保存的场景名称
         elif hasattr(self, '_current_scenario_name') and self._current_scenario_name:
             scenario_name = self._current_scenario_name
-            if getattr(self.config, 'ENABLE_SCENARIO_DEBUG', False) and getattr(self.config, 'ENABLE_DEBUG', True):
+            if getattr(self.config, 'ENABLE_SCENARIO_DEBUG', False):
                 print(f"[RESET DEBUG] 使用实例保存的场景名称: {scenario_name}")
         else:
-            if getattr(self.config, 'ENABLE_SCENARIO_DEBUG', False) and getattr(self.config, 'ENABLE_DEBUG', True):
+            if getattr(self.config, 'ENABLE_SCENARIO_DEBUG', False):
                 print(f"[RESET DEBUG] 使用默认场景名称: {scenario_name}")
 
+        # 保存当前场景名称和轮次信息
+        self._current_scenario_name = scenario_name
+        self._current_episode = requested_episode
+        self._last_reset_episode = requested_episode
+
+        # 【修复】检查是否需要重新生成场景
+        need_regenerate_scenario = False
+        
         if options and 'scenario' in options:
             # 课程学习模式：直接使用传入的、预先生成好的场景
             scenario = options['scenario']
             self.uavs = scenario['uavs']
             self.targets = scenario['targets']
             self.obstacles = scenario['obstacles']
+            need_regenerate_scenario = False
         elif scenario_name in ['small', 'balanced', 'complex']:
             # 静态预定义场景：直接加载，不重新生成
             from scenarios import get_small_scenario, get_balanced_scenario, get_complex_scenario
@@ -304,10 +378,71 @@ class UAVTaskEnv(gym.Env):
                 self.uavs, self.targets, self.obstacles = get_balanced_scenario(obstacle_tolerance)
             elif scenario_name == 'complex':
                 self.uavs, self.targets, self.obstacles = get_complex_scenario(obstacle_tolerance)
+            need_regenerate_scenario = False
         else:
-            # 动态随机场景模式：调用内部函数，根据场景名称模板随机生成新场景
-            self._initialize_entities(scenario_name)
+            # 动态随机场景模式：每次都重新生成场景
+            is_dynamic_mode = getattr(self.config, 'TRAINING_MODE', '') == 'dynamic'
+            is_dynamic_scenario = scenario_name in ['easy', 'medium', 'hard'] # 新增行
+            
+            if is_dynamic_mode or is_dynamic_scenario: # 修改条件
+                # 动态模式下每个episode都重新生成场景
+                need_regenerate_scenario = True
+                if getattr(self.config, 'ENABLE_SCENARIO_DEBUG', False) and not silent_reset:
+                    print(f"[RESET DEBUG] 生成新场景数据")
+                self._initialize_entities(scenario_name)
+                self._scenario_initialized = True
 
+                # --- 新增的修复逻辑：用新生成的实体来重新创建图对象，每当生成新实体后，必须重建图对象并更新动作空间 ---
+                if getattr(self.config, 'ENABLE_SCENARIO_DEBUG', False) and not silent_reset:
+                    print(f"[RESET DEBUG] Re-creating DirectedGraph for new scene.")
+                self.graph = DirectedGraph(self.uavs, self.targets, self.config.GRAPH_N_PHI, self.obstacles, self.config)
+                self._update_action_space()
+                
+                # # 核心修复：根据新的实体重新计算动作空间大小
+                # if self.graph is not None:
+                #     self.n_actions = len(self.targets) * len(self.uavs) * self.graph.n_phi
+                # else:
+                #     self.n_actions = len(self.targets) * len(self.uavs) * 1
+                
+                # if self.n_actions <= 0:
+                #     self.n_actions = 1 # 默认最小动作空间
+
+                # self.action_space = spaces.Discrete(self.n_actions)                 
+                
+            else:
+                # 非动态模式：检查是否已有场景数据
+                if (hasattr(self, 'uavs') and self.uavs and 
+                    hasattr(self, 'targets') and self.targets and
+                    hasattr(self, 'obstacles') and self.obstacles and
+                    hasattr(self, '_scenario_initialized') and self._scenario_initialized):
+                    # 已有场景数据，不重新生成
+                    need_regenerate_scenario = False
+                    if getattr(self.config, 'ENABLE_SCENARIO_DEBUG', False) and not silent_reset:
+                        print(f"[RESET DEBUG] 使用已有场景数据: UAV={len(self.uavs)}, 目标={len(self.targets)}, 障碍={len(self.obstacles)}")
+                else:
+                    # 需要生成新场景
+                    need_regenerate_scenario = True
+                    if getattr(self.config, 'ENABLE_SCENARIO_DEBUG', False) and not silent_reset:
+                        print(f"[RESET DEBUG] 生成新场景数据")
+                    self._initialize_entities(scenario_name)
+                    self._scenario_initialized = True
+                    # --- 在这里也需要添加图对象重建逻辑 ---
+                    if getattr(self.config, 'ENABLE_SCENARIO_DEBUG', False) and not silent_reset:
+                        print(f"[RESET DEBUG] Re-creating DirectedGraph for new static scene.")
+                    self.graph = DirectedGraph(self.uavs, self.targets, self.config.GRAPH_N_PHI, self.obstacles, self.config)
+                    self._update_action_space()
+                    # # 核心修复：根据新的实体重新计算动作空间大小
+                    # if self.graph is not None:
+                    #     self.n_actions = len(self.targets) * len(self.uavs) * self.graph.n_phi
+                    # else:
+                    #     self.n_actions = len(self.targets) * len(self.uavs) * 1
+                    
+                    # if self.n_actions <= 0:
+                    #     self.n_actions = 1 # 默认最小动作空间
+
+                    # self.action_space = spaces.Discrete(self.n_actions)
+                    
+                    # --- 修复逻辑结束 ---
         # [新增] 强制重置每个实体的内部状态
         for uav in self.uavs:
             # 假设UAV对象有reset方法或直接重置属性
@@ -339,6 +474,12 @@ class UAVTaskEnv(gym.Env):
 
         initial_obs = self._get_state()
         self.last_potential = self._calculate_potential()
+
+        # 【新增】输出最终场景重置结果
+        if getattr(self.config, 'ENABLE_SCENARIO_DEBUG', False) and not silent_reset:
+            print(f"[RESET DEBUG] 场景重置完成 - 轮次: {requested_episode}, "
+                  f"场景: {scenario_name}, "
+                  f"UAV={len(self.uavs)}, 目标={len(self.targets)}, 障碍={len(self.obstacles)}")
 
         return initial_obs, self._get_info()
 
@@ -949,8 +1090,7 @@ class UAVTaskEnv(gym.Env):
         
         if uav.id not in {a[0] for a in target.allocated_uavs}:
             target.allocated_uavs.append((uav.id, phi_idx))
-        uav.task_sequence.append((target_idx, phi_idx))
-        uav.current_position = np.array(target.position).copy()
+        uav.task_sequence.append((target_idx, phi_idx))        
         uav.heading = phi_idx * (2 * np.pi / self.graph.n_phi)
 
         # =================================================================
@@ -1723,8 +1863,8 @@ class UAVTaskEnv(gym.Env):
             target_num = np.clip(target_num, target_range[0], target_range[1])
             print(f"已修正目标数量为: {target_num}")
         
-        if getattr(self.config, 'ENABLE_SCENARIO_DEBUG', False):
-            print(f"[DEBUG] 最终生成数量: UAV={uav_num}, Target={target_num}, Obstacle={obstacle_num}")
+        # if getattr(self.config, 'ENABLE_SCENARIO_DEBUG', False):
+        #     print(f"[DEBUG] 最终生成数量: UAV={uav_num}, Target={target_num}, Obstacle={obstacle_num}")
         
         # 添加约束验证
         if self.config.VALIDATE_SCENARIO_CONSTRAINTS:
@@ -2049,7 +2189,10 @@ class UAVTaskEnv(gym.Env):
         # 记录障碍物生成结果
         # if generated_obstacles < obstacle_num:
         #     print(f"警告: 仅生成 {generated_obstacles}/{obstacle_num} 个障碍物（受重叠检查限制）")
-        
+        if getattr(self.config, 'ENABLE_SCENARIO_DEBUG', False):
+            # 使用 len() 来获取实际生成的实体数量
+            print(f"[DEBUG] 最终实际生成数量: UAV={len(self.uavs)}, Target={len(self.targets)}, Obstacle={len(self.obstacles)}")
+
         # 应用场景多样性特征，确保不同调用产生不同的场景布局
         self._add_scenario_diversity_features(scenario_name, uav_num, target_num)
 

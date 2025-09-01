@@ -791,12 +791,15 @@ class ModelEvaluator:
         # 动态场景
         elif scenario_name in ["easy", "medium", "hard"]:
             print(f"使用动态{scenario_name}场景进行推理")
-            # 创建临时环境来生成动态场景
-            from environment import UAVTaskEnv
-            # 直接创建临时环境，让环境内部处理图创建
-            temp_env = UAVTaskEnv([], [], None, [], self.config, obs_mode="graph")
-            temp_env._initialize_entities(scenario_name)
-            return temp_env.uavs, temp_env.targets, temp_env.obstacles
+            # 对于动态场景，返回空列表。
+            # 真正的场景将在 env.reset() 调用中生成。
+            return [], [], []
+            # # 创建临时环境来生成动态场景
+            # from environment import UAVTaskEnv
+            # # 直接创建临时环境，让环境内部处理图创建
+            # temp_env = UAVTaskEnv([], [], None, [], self.config, obs_mode="graph")
+            # temp_env._initialize_entities(scenario_name)
+            # return temp_env.uavs, temp_env.targets, temp_env.obstacles
         else:
             print(f"未知场景名称: {scenario_name}，使用默认small场景")
             return get_small_scenario(obstacle_tolerance)
@@ -830,6 +833,17 @@ class ModelEvaluator:
             obs_mode = "graph"
             i_dim = 64  # 占位值
             o_dim = len(targets) * len(uavs) * graph.n_phi
+
+            if o_dim <= 0 and scenario_name in ["easy", "medium", "hard"]:
+                # 如果是动态场景且初始为空，则使用配置中的最大实体数来创建网络
+                max_o_dim = self.config.MAX_TARGETS * self.config.MAX_UAVS * self.config.GRAPH_N_PHI
+                o_dim = max_o_dim
+                # 为了区分，可以在日志中添加不同的提示
+                if "_ensemble" in self.start_evaluation.__name__: # 这是一个简化的判断，实际应看调用栈
+                     print(f"动态场景集成推理：使用最大动作空间占位符 o_dim={o_dim}")
+                else:
+                     print(f"动态场景单模型推理：使用最大动作空间占位符 o_dim={o_dim}")
+
         else:
             obs_mode = "flat"
             target_dim = 7 * len(targets)
@@ -955,6 +969,16 @@ class ModelEvaluator:
             obs_mode = "graph"
             i_dim = 64
             o_dim = len(targets) * len(uavs) * graph.n_phi
+            if o_dim <= 0 and scenario_name in ["easy", "medium", "hard"]:
+                # 如果是动态场景且初始为空，则使用配置中的最大实体数来创建网络
+                max_o_dim = self.config.MAX_TARGETS * self.config.MAX_UAVS * self.config.GRAPH_N_PHI
+                o_dim = max_o_dim
+                # 为了区分，可以在日志中添加不同的提示
+                if "_ensemble" in self.start_evaluation.__name__: # 这是一个简化的判断，实际应看调用栈
+                     print(f"动态场景集成推理：使用最大动作空间占位符 o_dim={o_dim}")
+                else:
+                     print(f"动态场景单模型推理：使用最大动作空间占位符 o_dim={o_dim}")
+
         else:
             obs_mode = "flat"
             target_dim = 7 * len(targets)
@@ -1049,8 +1073,8 @@ class ModelEvaluator:
         Returns:
             dict: 推理结果
         """
-        # 【修复】在环境重置时传递正确的scenario_name参数
-        reset_options = {'scenario_name': scenario_name}
+        # 【修复】在环境重置时传递正确的scenario_name参数，推理时静默重置
+        reset_options = {'scenario_name': scenario_name, 'silent_reset': True}
         reset_result = env.reset(options=reset_options)
         # 处理reset返回的tuple格式 (state, info)
         if isinstance(reset_result, tuple):
@@ -1261,8 +1285,8 @@ class ModelEvaluator:
         Returns:
             dict: 推理结果
         """
-        # 【修复】在环境重置时传递正确的scenario_name参数
-        reset_options = {'scenario_name': scenario_name}
+        # 【修复】在环境重置时传递正确的scenario_name参数，推理时静默重置
+        reset_options = {'scenario_name': scenario_name, 'silent_reset': True}
         reset_result = env.reset(options=reset_options)
         # 处理reset返回的tuple格式 (state, info)
         if isinstance(reset_result, tuple):

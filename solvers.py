@@ -449,9 +449,23 @@ class GraphRLSolver:
                 print(f"警告: 状态监控变量初始化失败: {e}")
                 consecutive_zero_actions = 0
             
-            # 初始化状态（兼容graph/flat）- 修复：传递场景名称确保使用正确的场景约束
-            reset_options = {'scenario_name': scenario_name} if scenario_name else None
+            # 【修复】初始化状态 - 传递轮次信息确保每个轮次只重置一次
+            reset_options = {
+                'scenario_name': scenario_name,
+                'episode': i_episode
+            } if scenario_name else {'episode': i_episode}
             reset_result = self.env.reset(options=reset_options)
+
+            self.graph = self.env.graph
+
+            # --- ↓↓↓ 在这里添加调试代码 ↓↓↓ ---
+            print(f"--- DEBUG POINT 1 (post-reset) ---")
+            print(f"Solver graph ID: {id(self.graph)}, Env graph ID: {id(self.env.graph)}")
+            print(f"Solver graph nodes: {len(self.graph.nodes) if self.graph else 'None'}")
+            print(f"Env uavs: {len(self.env.uavs)}, Env targets: {len(self.env.targets)}")
+            print(f"------------------------------------")
+            # --- ↑↑↑ 调试代码结束 ↑↑↑ ---
+
             if isinstance(reset_result, tuple):
                 state, info = reset_result
             else:
@@ -493,6 +507,7 @@ class GraphRLSolver:
             episode_rewards_this_episode = []  # 用于记录每步奖励
             total_base_reward = 0.0  # 累积基础奖励
             total_shaping_reward = 0.0  # 累积塑形奖励
+            action_sequence = [] # 用于记录本轮的动作序列
 
             while True:
                 # 步骤1: 创建UAV资源状态的快照
@@ -535,6 +550,8 @@ class GraphRLSolver:
 
                 # 2. 智能体根据状态选择动作                
                 action, q_values = self.select_action(state)
+                action_sequence.append(action.item()) # <记录选择的动作
+
                 # ==================== 新增调试信息打印模块 ====================
                 if getattr(self.config, 'ENABLE_DEBUG', True):
                     print(f"\n[TRAIN_DEBUG] Episode {i_episode}, Step {step_counter + 1} | 动作候选列表 (Epsilon: {self.epsilon:.3f})")
@@ -772,7 +789,12 @@ class GraphRLSolver:
             # 回调：记录每轮奖励与完成率
             if on_episode_end is not None:
                 try:
-                    on_episode_end(i_episode, float(episode_reward), float(completion_rate))
+                    episode_info = {
+                        'action_sequence': action_sequence,
+                        'final_env': self.env  # 传递最终的环境状态
+                    }
+                    on_episode_end(i_episode, float(episode_reward), float(completion_rate), episode_info)
+                    
                 except Exception:
                     pass
 
@@ -934,7 +956,8 @@ class GraphRLSolver:
             self.policy_net.eval()
             
             # 1. [修正] 正确处理环境重置的返回值
-            reset_result = self.env.reset()
+            
+            reset_result = self.env.reset(options={'silent_reset': True})
             state = reset_result[0] if isinstance(reset_result, tuple) else reset_result
             
             assignments = {u.id: [] for u in self.env.uavs}
