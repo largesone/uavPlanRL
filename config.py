@@ -372,7 +372,7 @@ class Config:
         """设置日志级别映射，确保向后兼容"""
         # 根据LOG_LEVEL自动设置相关参数
         if self.LOG_LEVEL == 'minimal':
-            self.LOG_EPISODE_DETAIL = False
+            self.LOG_EPISODE_DETAIL = True
             self.LOG_REWARD_DETAIL = False
             self.ENABLE_DEBUG = False
             self.ENABLE_SCENARIO_DEBUG = False

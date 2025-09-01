@@ -458,12 +458,12 @@ class GraphRLSolver:
 
             self.graph = self.env.graph
 
-            # --- ↓↓↓ 在这里添加调试代码 ↓↓↓ ---
-            print(f"--- DEBUG POINT 1 (post-reset) ---")
-            print(f"Solver graph ID: {id(self.graph)}, Env graph ID: {id(self.env.graph)}")
-            print(f"Solver graph nodes: {len(self.graph.nodes) if self.graph else 'None'}")
-            print(f"Env uavs: {len(self.env.uavs)}, Env targets: {len(self.env.targets)}")
-            print(f"------------------------------------")
+            if getattr(self.config, 'ENABLE_DEBUG', False):
+                print(f"--- DEBUG POINT 1 (post-reset) ---")
+                print(f"Solver graph ID: {id(self.graph)}, Env graph ID: {id(self.env.graph)}")
+                print(f"Solver graph nodes: {len(self.graph.nodes) if self.graph else 'None'}")
+                print(f"Env uavs: {len(self.env.uavs)}, Env targets: {len(self.env.targets)}")
+                print(f"------------------------------------")
             # --- ↑↑↑ 调试代码结束 ↑↑↑ ---
 
             if isinstance(reset_result, tuple):
