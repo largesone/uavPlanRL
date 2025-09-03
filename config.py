@@ -142,7 +142,7 @@ class Config:
         
         # 向后兼容的调试参数（自动映射到LOG_LEVEL）
         self.ENABLE_DEBUG = False                       # 启用通用调试信息（向后兼容）
-        self.ENABLE_SCENARIO_DEBUG = True              # 启用场景生成调试信息
+        self.ENABLE_SCENARIO_DEBUG = False              # 启用场景生成调试信息
         
         # ----- 场景记录配置 -----
         # 场景数据记录控制
@@ -280,11 +280,11 @@ class Config:
         # ----- 渐进式自适应课程学习 (Granular Adaptive Curriculum) -----
         # 精细化课程训练参数
         self.CURRICULUM_USE_GRANULAR_PROGRESSION = True  # True: 启用渐进式课程, False: 使用原有模板
-        self.GRANULAR_CURRICULUM_LEVELS = 15  #3             # 课程的总等级数量
-        self.CURRICULUM_MASTERY_THRESHOLD = 0.85 # 0.50        # 课程掌握度阈值，达到此完成率视为掌握
-        self.CURRICULUM_PERFORMANCE_WINDOW = 20  # 5         # 性能评估滑动窗口大小
-        self.CURRICULUM_MAX_EPISODES_PER_LEVEL = 500 # 20    # 单个难度等级最大训练轮次
-        self.CURRICULUM_MIN_EPISODES_PER_LEVEL = 10 # 3     # 单个难度等级最小训练轮次
+        self.GRANULAR_CURRICULUM_LEVELS = 15  #3#              # 课程的总等级数量
+        self.CURRICULUM_MASTERY_THRESHOLD = 0.85 #0.50 #        # 课程掌握度阈值，达到此完成率视为掌握
+        self.CURRICULUM_PERFORMANCE_WINDOW = 20  #5 #          # 性能评估滑动窗口大小
+        self.CURRICULUM_MAX_EPISODES_PER_LEVEL = 500 # 20#      # 单个难度等级最大训练轮次
+        self.CURRICULUM_MIN_EPISODES_PER_LEVEL = 30 # 3#       # 单个难度等级最小训练轮次
         
         
         # --- 课程起点参数 ---
@@ -296,6 +296,28 @@ class Config:
         # --- 课程终点参数 (将直接从全局配置读取 MAX_UAVS 和 MAX_TARGETS) ---
         self.GRANULAR_END_OBSTACLES = 20                 # 最终障碍物数量
         self.GRANULAR_END_ABUNDANCE = 1.0                # 最终资源充裕度 (1.0倍需求)  
+
+        # ----- 掌握度阈值自适应调整机制 -----
+        self.ADAPTIVE_THRESHOLD_ENABLED = True           # True: 启用阈值自适应调整
+        self.ADAPTIVE_THRESHOLD_INITIAL = 0.90           # 初始掌握度阈值
+        self.ADAPTIVE_THRESHOLD_MIN = 0.85               # 阈值可降低到的最小值，防止标准过低
+        self.ADAPTIVE_THRESHOLD_MAX = 0.95               # 阈值可提升到的最大值 (为未来功能预留)
+
+        # --- 停滞判断参数 (用于自动降低阈值) ---
+        self.ADAPTIVE_THRESHOLD_STAGNATION_TRIGGER = 0.7 # 当训练超过等级最大轮次的70%时，开始检查停滞
+        self.ADAPTIVE_THRESHOLD_PLATEAU_STD_DEV = 0.03   # 当性能窗口内完成率的标准差低于此值，视为进入平台期
+        self.ADAPTIVE_THRESHOLD_DOWN_STEP = 0.02         # 每次自动降低的步长 (例如从0.85降至0.83)
+        
+        # ----- 阈值自适应调整高级策略 -----
+        # 1. 晋级后不稳定处理 (用于自动升高阈值)
+        self.ADAPTIVE_THRESHOLD_INSTABILITY_CHECK = True # True: 启用晋级后表现检查
+        self.ADAPTIVE_THRESHOLD_INSTABILITY_DROP = 0.30  # 晋级后，若完成率下跌超过30%，则认为基础不牢
+        self.ADAPTIVE_THRESHOLD_UP_STEP = 0.02           # 每次自动升高的步长 (例如从0.85升至0.87)
+
+        # 2. 更精确的平台期判断
+        self.ADAPTIVE_THRESHOLD_USE_SLOPE = True         # True: 启用趋势斜率辅助判断平台期
+        self.ADAPTIVE_THRESHOLD_PLATEAU_SLOPE = 0.005    # 当性能窗口的趋势斜率低于此值，视为无明显增长
+
         # ----- 渐进式自适应课程学习 (Granular Adaptive Curriculum) -----
               
         # ----- 模拟与评估参数 -----
@@ -394,7 +416,7 @@ class Config:
             self.ENABLE_SCENARIO_DEBUG = False
         elif self.LOG_LEVEL == 'simple':
             self.LOG_EPISODE_DETAIL = True
-            self.LOG_REWARD_DETAIL = False
+            self.LOG_REWARD_DETAIL = True
             self.ENABLE_DEBUG = False
             self.ENABLE_SCENARIO_DEBUG = True
         elif self.LOG_LEVEL == 'detailed':

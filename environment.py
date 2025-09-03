@@ -1004,9 +1004,10 @@ class UAVTaskEnv(gym.Env):
         log_level = getattr(self.config, 'LOG_LEVEL', 'simple')
         log_episode_detail = getattr(self.config, 'LOG_EPISODE_DETAIL', False)
         log_reward_detail = getattr(self.config, 'LOG_REWARD_DETAIL', False)
+        log_debug_detail = getattr(self.config, 'ENABLE_DEBUG', False)
         
         # 只在启用奖励详情时输出步级别的详细信息
-        if log_reward_detail:
+        if log_debug_detail:
             print("\n" + "="*80)
             print(f"--- [ENV.STEP DEBUG] Episode: (无法直接获取), UAVs:{len(self.uavs)},Targets:{len(self.targets)},Step: {self.step_count} ---")
             print(f"--- Action Received: {action} ---")
@@ -1015,10 +1016,10 @@ class UAVTaskEnv(gym.Env):
             target_idx, uav_idx, phi_idx = self._action_to_assignment(action)
             target = self.targets[target_idx]
             uav = self.uavs[uav_idx]
-            if log_reward_detail:
+            if log_debug_detail:
                 print(f"[DEBUG] Action Decoded: UAV ID={uav.id} -> Target ID={target.id}")
         except IndexError as e:
-            if log_level in ['detailed', 'debug']:
+            if getattr(self.config, 'ENABLE_DEBUG', False):
                 print(f"[FATAL ERROR] Action decoding failed: {e}")
             # 返回一个带有巨大惩罚的终止状态
             return self.get_state(), -500.0, True, False, {'error': 'Invalid action index'}
@@ -1029,7 +1030,7 @@ class UAVTaskEnv(gym.Env):
         uav_res_before = uav.resources.copy()
         target_need_before = target.remaining_resources.copy()
         
-        if log_reward_detail:
+        if log_debug_detail:
             print("--- State (Before Execution) ---" 
                 f"[DEBUG] UAV {uav.id} Resources: {uav_res_before}"
                 f" Target {target.id} Needs: {target_need_before}")
@@ -1040,7 +1041,7 @@ class UAVTaskEnv(gym.Env):
         # 原子性地计算资源转移向量
         resource_transfer_vector = np.minimum(uav_res_before, target_need_before)
         
-        if log_reward_detail:
+        if log_debug_detail:
             print("--- Core Calculation ---"
                  f" Calculated Transfer Vector: {resource_transfer_vector}")
         
@@ -1063,20 +1064,20 @@ class UAVTaskEnv(gym.Env):
             target.remaining_resources = np.maximum(target.remaining_resources, 0)
 
         except Exception as e:
-            if log_level in ['detailed', 'debug']:
+            if getattr(self.config, 'ENABLE_DEBUG', False):
                 print(f"[FATAL ERROR] State update failed: {e}")
             return self._get_state(), -500.0, True, False, {'error': 'State update failed'}
 
         # =================================================================
         # section 4: 状态快照 (执行后)
         # =================================================================
-        if log_reward_detail:
+        if log_debug_detail:
             print("--- State (After Execution) ---" 
                 f"[DEBUG] UAV {uav.id} Resources Now: {uav.resources}"
                 f" Target {target.id} Needs Now: {target.remaining_resources}")
 
         # 验证更新是否正确 - 只在启用奖励详情时输出
-        if log_reward_detail:
+        if log_debug_detail:
             expected_uav_res = uav_res_before - resource_transfer_vector
             expected_target_need = target_need_before - resource_transfer_vector
             if not np.allclose(uav.resources, expected_uav_res) or not np.allclose(target.remaining_resources, expected_target_need):

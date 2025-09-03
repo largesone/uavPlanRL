@@ -12,7 +12,7 @@ import torch
 import matplotlib.pyplot as plt
 from typing import Dict, List, Tuple, Optional
 from datetime import datetime
-
+import numpy as np
 from collections import deque
 from scenarios import _generate_scenario # 导入场景生成函数
 
@@ -30,6 +30,8 @@ class ModelTrainer:
     
     def __init__(self, config: Config):
         self.config = config
+        self.level_thresholds = {}  # 用于存储每个等级的动态掌握度阈值
+        self.last_promotion_info = None  # 用于记录上一次的晋级信息，以检查不稳定性
         self.training_stats = {
             'episode_rewards': [],
             'completion_rates': [],
@@ -2038,6 +2040,7 @@ class ModelTrainer:
         global_episode_counter = 0
         best_reward = float('-inf')
         curriculum_start_time = time.time()
+        self.last_promotion_info = None # 开始新训练时重置
 
         # 获取日志级别
         log_level = getattr(self.config, 'LOG_LEVEL', 'simple')
@@ -2047,10 +2050,14 @@ class ModelTrainer:
             print(f"📊 掌握度阈值: {self.config.CURRICULUM_MASTERY_THRESHOLD:.2f}, 性能窗口: {self.config.CURRICULUM_PERFORMANCE_WINDOW}")
 
         # --- 2. 按等级进行主循环 ---
-        for level in range(total_levels):
+        for level in range(total_levels):            
+            # --- 2.1. 初始化当前等级的阈值 ---
+            # 如果之前没有为该等级设置过阈值，则使用配置文件中的初始值
+            current_threshold = self.level_thresholds.setdefault(
+                level, self.config.ADAPTIVE_THRESHOLD_INITIAL
+            )
             level_start_time = time.time()
-
-            # --- 2.1. 计算当前等级的场景参数 ---
+            # --- 2.2. 计算当前等级的场景参数 ---
             level_params = self._calculate_level_parameters(level)
             scenario_name = f"Level_{level+1:02d}"
             if getattr(self.config, 'LOG_EPISODE_DETAIL', False):
@@ -2058,7 +2065,7 @@ class ModelTrainer:
                 print(f"进入等级: {scenario_name} | UAVs:{level_params['uav_num']}, Targets:{level_params['target_num']}, Obstacles:{level_params['obstacle_num']}, Abundance:{level_params['resource_abundance']:.2f}")
                 print("="*80)
 
-            # --- 2.2. 初始化或更新求解器 ---
+            # --- 2.3. 初始化或更新求解器 ---
             if solver is None:
                 # 首次创建求解器，使用最大维度以兼容所有等级
                 i_dim = 64  # ZeroShotGNN固定输入
@@ -2070,7 +2077,7 @@ class ModelTrainer:
                 solver.step_logger = self.log_step_reward
                 solver.action_logger = self.log_action_details
 
-            # --- 2.3. 等级内的训练循环 ---
+            # --- 2.4. 等级内的训练循环 ---
             performance_window = deque(maxlen=self.config.CURRICULUM_PERFORMANCE_WINDOW)
             max_episodes_per_level = self.config.CURRICULUM_MAX_EPISODES_PER_LEVEL
 
@@ -2078,7 +2085,7 @@ class ModelTrainer:
                 global_episode_counter += 1
                 episode_start_time = time.time()
 
-                # --- 2.3.1. 动态生成当前等级的随机场景 ---
+                # --- 2.4.1. 动态生成当前等级的随机场景 ---
                 scenario_dict = _generate_scenario(self.config, **level_params)
                 uavs, targets, obstacles = scenario_dict['uavs'], scenario_dict['targets'], scenario_dict['obstacles']
 
@@ -2086,7 +2093,7 @@ class ModelTrainer:
                 graph = DirectedGraph(uavs, targets, self.config.GRAPH_N_PHI, obstacles, self.config)
                 solver.env = UAVTaskEnv(uavs, targets, graph, obstacles, self.config, obs_mode="graph")
 
-                # --- 2.3.2. 单个训练回合的核心逻辑 ---
+                # --- 2.4.2. 单个训练回合的核心逻辑 ---
                 state, _ = solver.env.reset(options={'scenario': scenario_dict})
                 episode_reward, step_count = 0.0, 0
                 total_base_reward, total_shaping_reward = 0.0, 0.0
@@ -2114,7 +2121,7 @@ class ModelTrainer:
                 if global_episode_counter % self.config.TARGET_UPDATE_FREQ == 0:
                     solver.target_net.load_state_dict(solver.policy_net.state_dict())
 
-                # --- 2.3.3. 日志记录、统计与晋级检查 ---
+                # --- 2.4.3. 日志记录、统计与晋级检查 ---
                 completion_rate = solver.env.get_completion_rate()
                 performance_window.append(completion_rate)
 
@@ -2125,7 +2132,7 @@ class ModelTrainer:
                 self.training_stats['episode_losses'].append(avg_loss)
 
                 # 日志输出（遵循日志等级）
-                if log_level in ['detailed', 'debug']:
+                if getattr(self.config, 'LOG_REWARD_DETAIL', False):
                     episode_elapsed = time.time() - episode_start_time
                     resource_abundance_info = self._calculate_resource_abundance(uavs, targets)
                     path_algo = "高精度PH-RRT" if self.config.USE_PHRRT_DURING_TRAINING else "快速近似"
@@ -2144,15 +2151,73 @@ class ModelTrainer:
                     completion_rate, solver.epsilon, time.time() - episode_start_time, {},
                     uavs, targets, obstacles, scenario_name, solver
                 )
+              
+                # --- 2.4.4. 检查是否需要自适应调整阈值 ---
+                if self.config.ADAPTIVE_THRESHOLD_ENABLED:
+                    # (策略一: 晋级后不稳定检查)
+                    # 检查是否刚从上一级晋升过来
+                    if self.last_promotion_info and self.last_promotion_info['level_promoted_to'] == level:
+                        # 当在新等级收集到足够的数据点时
+                        if len(performance_window) == self.config.CURRICULUM_PERFORMANCE_WINDOW:
+                            new_level_avg_completion = np.mean(performance_window)
+                            prev_level_threshold = self.last_promotion_info['threshold_passed']
 
-                # 检查晋级条件
+                            # 如果在新等级的表现大幅下跌
+                            if new_level_avg_completion < (prev_level_threshold - self.config.ADAPTIVE_THRESHOLD_INSTABILITY_DROP):
+                                prev_level_idx = self.last_promotion_info['level_promoted_from']
+                                # 提升上一级的阈值
+                                new_prev_threshold = min(
+                                    self.config.ADAPTIVE_THRESHOLD_MAX,
+                                    self.level_thresholds[prev_level_idx] + self.config.ADAPTIVE_THRESHOLD_UP_STEP
+                                )
+                                if new_prev_threshold > self.level_thresholds[prev_level_idx]:
+                                    self.level_thresholds[prev_level_idx] = new_prev_threshold
+                                    print(f"🧠 [自适应调整] 检测到晋级后表现不稳定，已将等级 {prev_level_idx+1} 的阈值提升至: {new_prev_threshold:.2f}")
+
+                            self.last_promotion_info = None # 该检查只执行一次
+
+                    # (策略二: 训练停滞检查)
+                    stagnation_check_episode = int(self.config.ADAPTIVE_THRESHOLD_STAGNATION_TRIGGER * max_episodes_per_level)
+                    if episode_in_level >= stagnation_check_episode and len(performance_window) >= self.config.CURRICULUM_PERFORMANCE_WINDOW:
+
+                        # (策略二优化: 结合标准差和斜率判断平台期)
+                        is_plateau = False
+                        performance_std_dev = np.std(performance_window)
+                        if performance_std_dev < self.config.ADAPTIVE_THRESHOLD_PLATEAU_STD_DEV:
+                            if self.config.ADAPTIVE_THRESHOLD_USE_SLOPE:
+                                # 计算趋势斜率
+                                x = np.arange(len(performance_window))
+                                slope, _ = np.polyfit(x, list(performance_window), 1)
+                                if slope < self.config.ADAPTIVE_THRESHOLD_PLATEAU_SLOPE:
+                                    is_plateau = True
+                            else:
+                                is_plateau = True
+
+                        if is_plateau:
+                            # 如果进入平台期，则小幅降低阈值
+                            new_threshold = max(
+                                self.config.ADAPTIVE_THRESHOLD_MIN,
+                                current_threshold - self.config.ADAPTIVE_THRESHOLD_DOWN_STEP
+                            )
+                            if new_threshold < current_threshold:
+                                current_threshold = new_threshold
+                                self.level_thresholds[level] = current_threshold
+                                print(f"🧠 [自适应调整] 检测到训练停滞，已将等级 {level+1} 的掌握度阈值下调至: {current_threshold:.2f}")
+
+                # --- 2.4.5. 检查晋级条件 ---
                 if len(performance_window) >= self.config.CURRICULUM_PERFORMANCE_WINDOW:
                     avg_completion = np.mean(performance_window)
-                    if avg_completion >= self.config.CURRICULUM_MASTERY_THRESHOLD:
-                        print(f"🎉 掌握度达标! 平均完成率 {avg_completion:.2%} >= {self.config.CURRICULUM_MASTERY_THRESHOLD:.0%}. 晋级到下一等级。")
-                        break
+                    if avg_completion >= current_threshold:
+                        print(f"🎉 掌握度达标! 平均完成率 {avg_completion:.2%} >= {current_threshold:.0%}. 晋级到下一等级。")
+                        # 记录晋级信息，用于下一级的表现检查
+                        self.last_promotion_info = {
+                            'level_promoted_from': level,
+                            'level_promoted_to': level + 1,
+                            'threshold_passed': current_threshold
+                        }
+                        break 
 
-            # --- 2.4. 等级训练结束总结 ---
+            # --- 2.5. 等级训练结束总结 ---
             level_duration = time.time() - level_start_time
             print(f"--- 等级 {scenario_name} 训练结束 (耗时: {level_duration:.1f}s) ---")
             if episode_in_level == max_episodes_per_level - 1:
