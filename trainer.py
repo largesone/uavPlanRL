@@ -383,33 +383,51 @@ class ModelTrainer:
             targets: 目标列表
             completion_rate: 传入的标准完成率，优先使用此值
         """
+        # 【修改后的代码】
+        # (该方法被完全重写以支持资源消耗模拟)
         report_lines = []
         report_lines.append("---------- 训练轮次推理结果报告 ----------")
         
         # 1. 总体资源满足情况
-        satisfied_targets, total_targets, satisfaction_rate, resource_completion_rate, total_demand, total_contribution = self._calculate_resource_summary(task_assignments, uavs, targets)
-              
+        # 首先，我们需要一个更准确的方式来计算总贡献
+        temp_uav_resources_summary = {u.id: u.initial_resources.copy().astype(float) for u in uavs}
+        temp_target_needs_summary = {t.id: t.resources.copy().astype(float) for t in targets}
+
+        for uav_id in sorted(task_assignments.keys()):
+            assignments = task_assignments.get(uav_id, [])
+            for target_id, _ in assignments:
+                uav_available = temp_uav_resources_summary[uav_id]
+                target_needed = temp_target_needs_summary[target_id]
+                contribution = np.minimum(uav_available, target_needed)
+                
+                temp_uav_resources_summary[uav_id] -= contribution
+                temp_target_needs_summary[target_id] -= contribution
+
+        total_demand = np.sum([t.resources for t in targets], axis=0)
+        total_contribution = total_demand - np.sum(list(temp_target_needs_summary.values()), axis=0)
+        satisfied_targets = sum(1 for t_id, needs in temp_target_needs_summary.items() if np.all(needs <= 1e-5))
+        
         report_lines.append("\n总体资源满足情况:")
         report_lines.append("-" * 26)
         report_lines.append(f"- 总需求/总贡献: {np.array2string(total_demand, formatter={'float_kind':lambda x: '%.0f' % x})} / {np.array2string(total_contribution, formatter={'float_kind':lambda x: '%.1f' % x})}")
-        report_lines.append(f"- 已满足目标: {satisfied_targets} / {total_targets} ({satisfaction_rate:.1f}%)")
-        report_lines.append(f"- 资源完成率: {resource_completion_rate:.1f}%")
-        
-        # 2. UAV 详细任务分配
+        report_lines.append(f"- 已满足目标: {satisfied_targets} / {len(targets)} ({satisfied_targets/len(targets)*100:.1f}%)")
+        report_lines.append(f"- 资源完成率: {np.mean(np.minimum(total_contribution, total_demand) / (total_demand + 1e-6)) * 100:.1f}%")
+
+        # 2. UAV 详细任务分配 (包含资源消耗模拟)
         report_lines.append("\nUAV详细任务分配:")
         report_lines.append("-" * 26)
         
-        # 按UAV ID排序
-        sorted_uav_ids = sorted(task_assignments.keys())
-        for uav_id in sorted_uav_ids:
+        temp_uav_resources_report = {u.id: u.initial_resources.copy().astype(float) for u in uavs}
+        temp_target_needs_report = {t.id: t.resources.copy().astype(float) for t in targets}
+        
+        for uav_id in sorted(task_assignments.keys()):
             uav = next((u for u in uavs if u.id == uav_id), None)
             if not uav: continue
             
-            # [核心修正] 确保 uav.initial_resources 存在
             initial_res = getattr(uav, 'initial_resources', uav.resources)
-            assignments = task_assignments.get(uav_id, [])
             report_lines.append(f"* 无人机 {uav_id} (初始资源: {np.array2string(initial_res, formatter={'float_kind': lambda x: f'{x:.0f}'})})")
             
+            assignments = task_assignments.get(uav_id, [])
             if not assignments:
                 report_lines.append("  - 未分配任何任务")
             else:
@@ -417,10 +435,20 @@ class ModelTrainer:
                     target = next((t for t in targets if t.id == target_id), None)
                     if not target: continue
                     
-                    # [核心修正] 使用正确的属性名 uav.position
-                    dist = np.linalg.norm(uav.position - target.position)
-                    report_lines.append(f"  {i}. 分配给 目标 {target_id} (距离: {dist:.1f}m, 角度: {phi_idx})")
-        
+                    uav_res_before = temp_uav_resources_report[uav_id]
+                    target_need_before = temp_target_needs_report[target_id]
+                    contribution = np.minimum(uav_res_before, target_need_before)
+                    
+                    # 更新状态用于报告的下一步
+                    temp_uav_resources_report[uav_id] -= contribution
+                    temp_target_needs_report[target_id] -= contribution
+                    
+                    dist = np.linalg.norm(uav.position - target.position) # 注意：这里是初始距离
+                    report_lines.append(f"  {i}. 分配给 目标 {target.id}:")
+                    report_lines.append(f"     - 飞行距离: {dist:.1f}m, 角度: {phi_idx}")
+                    report_lines.append(f"     - 资源贡献: {np.array2string(contribution, formatter={'float_kind':lambda x: '%.1f' % x})}")
+                    report_lines.append(f"     - 剩余资源: {np.array2string(temp_uav_resources_report[uav_id], formatter={'float_kind':lambda x: '%.1f' % x})}")
+
         report_lines.append("\n" + "="*80)
         return "\n".join(report_lines)
     def _calculate_standard_completion_rate(self, targets):
@@ -458,7 +486,9 @@ class ModelTrainer:
         total_contribution_sum = np.sum(total_contribution)
         
         if total_demand_sum > 0:
-            completion_rate = min(total_contribution_sum / total_demand_sum, 1.0)
+            # 标准满足率计算：使用“平均比例法”确保与evaluate.py的逻辑一致
+            completion_rate_per_resource = np.minimum(total_contribution, total_demand) / total_demand_safe
+            completion_rate = np.mean(completion_rate_per_resource)
         else:
             completion_rate = 1.0
         

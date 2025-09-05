@@ -67,7 +67,7 @@ def parse_arguments():
     python main.py --mode train --use-phrrt-training --episodes 500      # 训练时使用高精度PH-RRT算法
     
   推理模式:
-    python main.py --mode inference --models output/saved_model_final.pth --scenario balanced   # 单模型推理，指定推理场景
+    python main.py --mode inference --models output/models/600.pth --scenario balanced   # 单模型推理，指定推理场景
     python main.py --mode inference --models model1.pth model2.pth --scenario balanced  # 集成推理
     python main.py --mode inference --use-phrrt-planning --scenario hard # 推理时使用高精度PH-RRT算法
     

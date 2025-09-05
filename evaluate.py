@@ -60,7 +60,16 @@ def evaluate_plan(final_plan, uavs, targets, deadlocked_tasks=None, final_uav_st
             resource_cost = task.get('resource_cost', np.zeros(len(total_demand)))
         target_contributions[task['target_id']] += resource_cost
 
-    total_contribution = np.sum(list(target_contributions.values()), axis=0)
+    #【修改后的代码】
+    # 之前这里直接对 target_contributions 求和，在某些情况下可能导致重复计算
+    # 现在改为直接使用 final_uav_states 计算总贡献，这是最准确的数据源
+    if final_uav_states:
+        total_initial = np.sum([np.array(s['initial_resources']) for s in final_uav_states], axis=0)
+        total_final = np.sum([np.array(s['final_resources']) for s in final_uav_states], axis=0)
+        total_contribution = total_initial - total_final
+    else:
+        # 后备方案：如果 final_uav_states 不可用，则使用原有逻辑
+        total_contribution = np.sum(list(target_contributions.values()), axis=0)
     
     satisfied_targets_count = sum(1 for t in targets if np.all(target_contributions[t.id] >= t.resources - 1e-5))
     if not targets:
@@ -73,7 +82,10 @@ def evaluate_plan(final_plan, uavs, targets, deadlocked_tasks=None, final_uav_st
             # 部分完成时，使用平方来放大差距，鼓励完成更多目标
             satisfied_targets_rate = raw_rate ** 2
 
-    completion_rate = np.mean(np.minimum(total_contribution, total_demand) / total_demand_safe)
+    total_demand_sum = np.sum(total_demand)
+    total_contribution_sum = np.sum(np.minimum(total_contribution, total_demand))
+    completion_rate = total_contribution_sum / total_demand_sum if total_demand_sum > 0 else 1.0    
+    
     resource_penalty = np.mean(np.maximum(0, total_demand - total_contribution) / total_demand_safe)
     
     if not all_tasks:

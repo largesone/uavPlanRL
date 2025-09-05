@@ -1091,6 +1091,16 @@ class UAVTaskEnv(gym.Env):
         
         if uav.id not in {a[0] for a in target.allocated_uavs}:
             target.allocated_uavs.append((uav.id, phi_idx))
+            
+            # 【修改后的代码】更新目标的"在途"资源量
+            # 我们假设一旦派遣，无人机会承诺其能提供的所有相关资源
+            potential_contribution = np.minimum(uav.resources, target.remaining_resources)
+            target.in_flight_resources += potential_contribution
+            
+        # 【新增代码】在动作执行后，立即更新无人机的当前位置为目标位置
+        # 这是修复无效飞行Bug的关键，确保下一步决策基于正确的位置状态
+        uav.current_position = np.array(target.position).copy()
+        
         uav.task_sequence.append((target_idx, phi_idx))        
         uav.heading = phi_idx * (2 * np.pi / self.graph.n_phi)
 
@@ -2424,13 +2434,23 @@ class UAVTaskEnv(gym.Env):
         return target_idx, uav_idx, phi_idx
     
     def _is_valid_action(self, target, uav, phi_idx):
-        """检查动作是否有效"""
-        if np.all(uav.resources <= 0):
+        """检查动作是否有效 - 【核心修改】实现智能动作屏蔽规则"""
+        
+        # 【修改后的代码】
+        # 规则1：无人机必须拥有目标实际需要的资源
+        if not self._has_actual_contribution(target, uav):
             return False
-        if np.all(target.remaining_resources <= 0):
+
+        # 规则2：不能向"即将满足"的目标重复派遣
+        # 检查目标的剩余需求是否已经被"在途"的资源覆盖
+        effective_demand = target.remaining_resources - target.in_flight_resources
+        if np.all(effective_demand <= 0):
             return False
+        
+        # 规则3 (原有逻辑)：不能重复分配同一个无人机到同一个目标
         if (uav.id, phi_idx) in target.allocated_uavs:
             return False
+
         return True
     
     def _has_actual_contribution(self, target, uav):
@@ -3010,7 +3030,9 @@ class UAVTaskEnv(gym.Env):
         total_contribution_sum = np.sum(total_contribution)
         
         if total_demand_sum > 0:
-            completion_rate = min(total_contribution_sum / total_demand_sum, 1.0)
+                    # 使用“平均比例法”计算，与evaluate.py保持一致，更能反映任务成功度
+            completion_rate_per_resource = np.minimum(total_contribution, total_demand) / total_demand_safe
+            completion_rate = np.mean(completion_rate_per_resource)
         else:
             completion_rate = 1.0
         

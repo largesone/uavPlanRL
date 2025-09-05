@@ -40,8 +40,13 @@ class Target:
         self.value = value
         self.allocated_uavs = []
         self.remaining_resources = np.array(resources)
+        
+        # 【新增属性】用于追踪"在途"资源量，防止过度分配
+        self.in_flight_resources = np.zeros_like(self.resources, dtype=float)
 
     def reset(self):
         """重置目标的状态到初始值"""
         self.allocated_uavs = []
         self.remaining_resources = self.resources.copy()
+        # 【修改后的代码】同步重置在途资源量
+        self.in_flight_resources = np.zeros_like(self.resources, dtype=float)

@@ -169,7 +169,7 @@ class Config:
         # ----- 训练轮次推理结果记录配置 -----
         # 每轮次推理结果记录控制
         self.SAVE_EPISODE_INFERENCE_RESULTS = True      # 是否保存每轮次的推理结果
-        self.EPISODE_INFERENCE_LOG_FORMAT = 'detailed'  # 轮次推理记录格式: 'simple', 'detailed', 'both'
+        self.EPISODE_INFERENCE_LOG_FORMAT = 'detailed'  # 轮次推理日志记录格式: 'simple', 'detailed', 'both'
         self.EPISODE_INFERENCE_INCLUDE_TASK_ALLOCATION = True  # 是否包含详细的任务分配方案
         self.EPISODE_INFERENCE_INCLUDE_PERFORMANCE_METRICS = True  # 是否包含性能指标
         self.EPISODE_INFERENCE_INCLUDE_COMPLETE_VISUALIZATION = True  # 是否包含完整可视化结果

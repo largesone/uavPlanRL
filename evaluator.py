@@ -151,7 +151,7 @@ class PlanVisualizer:
                           f"- 总需求/总贡献: {np.array2string(total_demand_all, formatter={'float_kind':lambda x: '%.0f' % x})} / {np.array2string(total_contribution_all_for_summary, formatter={'float_kind':lambda x: '%.1f' % x})}\n"
                           f"- 总供给/资源富裕度: {np.array2string(total_supply_all, formatter={'float_kind':lambda x: '%.0f' % x})} / {np.array2string(resource_abundance_rate, formatter={'float_kind':lambda x: '%.1f%%' % x})}\n"
                           f"- 已满足目标: {satisfied_targets_count} / {num_targets} ({satisfaction_rate_percent:.1f}%)\n"
-                          f"- 目标资源满足率: {overall_completion_rate_percent:.1f}% (显示用，文件名使用标准评估指标)")
+                          f"- 满足率: {overall_completion_rate_percent:.1f}% (显示用，文件名使用标准评估指标)")
 
         # 绘制无人机起点
         ax.scatter([u.position[0] for u in uavs], [u.position[1] for u in uavs], 
@@ -331,7 +331,7 @@ class PlanVisualizer:
             # 定义指标的中文名称映射
             metric_names = {
                 'resource_utilization_rate': '资源利用率',
-                'completion_rate': '资源完成率',
+                'completion_rate': '资源满足率',
                 'sync_feasibility_rate': '同步可行率',
                 'load_balance_score': '负载均衡度'
             }
@@ -600,10 +600,16 @@ class ModelEvaluator:
             final_uav_states = results.get('final_uav_states', None)
             evaluation_metrics = evaluate_plan(final_plan, uavs, targets, final_uav_states=final_uav_states)
             
-            # 确保 evaluation_metrics 中包含从 results 中获取的完成率
+            # 【重要修改】以推理结果为准，推理结果就是最终的分配方案
             if results and 'completion_rate' in results:
+                # 使用推理结果中的完成率作为最终结果
                 evaluation_metrics['completion_rate'] = results['completion_rate']
                 print(f"[DEBUG] 使用推理结果中的完成率: {results['completion_rate']:.4f}")
+                
+                # 如果有推理任务分配方案，使用推理结果覆盖evaluate_plan的结果
+                if 'inference_task_assignments' in results and 'inference_target_status' in results:
+                    print(f"[DEBUG] 使用推理任务分配方案作为最终结果")
+                    # 可以在这里添加逻辑来使用推理结果覆盖evaluate_plan的某些指标
             else:
                 print(f"[DEBUG] 使用evaluate_plan计算的完成率: {evaluation_metrics.get('completion_rate', 0):.4f}")
             
@@ -626,82 +632,123 @@ class ModelEvaluator:
         except Exception as e:
             print(f"生成完整可视化时出错: {e}")
 
+    def _build_plan_from_inference_results(self, results, uavs, targets):
+        """
+        从推理结果构建执行计划
+        
+        Args:
+            results: 推理结果字典
+            uavs: UAV列表
+            targets: 目标列表
+            
+        Returns:
+            dict: 执行计划
+        """
+        final_plan = {uav.id: [] for uav in uavs}
+        
+        inference_assignments = results.get('inference_task_assignments', {})
+        inference_targets = results.get('inference_target_status', {})
+        
+        print(f"[DEBUG] 从推理结果构建执行计划:")
+        print(f"  - UAV分配方案数量: {len(inference_assignments)}")
+        print(f"  - 目标状态数量: {len(inference_targets)}")
+        
+        # 为每个UAV构建任务序列
+        for uav_id, uav_info in inference_assignments.items():
+            consumed_resources = uav_info['consumed_resources']
+            initial_resources = uav_info['initial_resources']
+            
+            # 找到该UAV贡献资源的目标
+            uav_tasks = []
+            for target_id, target_info in inference_targets.items():
+                contributed_resources = target_info['contributed_resources']
+                
+                # 检查该UAV是否向此目标贡献了资源
+                if np.any(contributed_resources > 0):
+                    # 计算该UAV对此目标的贡献比例
+                    # 这里简化处理，假设UAV按比例贡献资源
+                    contribution_ratio = np.mean(contributed_resources / (initial_resources + 1e-6))
+                    
+                    if contribution_ratio > 0.1:  # 如果贡献比例超过10%，认为该UAV参与了此目标
+                        # 找到对应的目标对象
+                        target_obj = next((t for t in targets if t.id == target_id), None)
+                        uav_obj = next((u for u in uavs if u.id == uav_id), None)
+                        
+                        if target_obj and uav_obj:
+                            distance = np.linalg.norm(uav_obj.position - target_obj.position)
+                            speed = 15.0  # 默认速度
+                            
+                            task = {
+                                'target_id': target_id,
+                                'step': len(uav_tasks) + 1,
+                                'distance': distance,
+                                'speed': speed,
+                                'arrival_time': distance / speed,
+                                'resource_cost': contributed_resources,
+                                'is_sync_feasible': True  # 推理结果认为可行
+                            }
+                            uav_tasks.append(task)
+            
+            final_plan[uav_id] = uav_tasks
+            print(f"  - UAV {uav_id}: 分配了 {len(uav_tasks)} 个任务")
+        
+        return final_plan
 
-    
     def _convert_results_to_plan(self, results, uavs, targets):
         """将推理结果转换为final_plan格式"""
         final_plan = {uav.id: [] for uav in uavs}
         
-        # 简化版本：基于action_sequence重构任务分配
-        action_sequence = results.get('action_sequence', [])
+        # 【重要修改】优先使用推理任务分配方案，如果存在的话
+        if 'inference_task_assignments' in results and 'inference_target_status' in results:
+            print(f"[DEBUG] 使用推理任务分配方案构建执行计划")
+            return self._build_plan_from_inference_results(results, uavs, targets)
         
+        # 后备方案：基于action_sequence重构任务分配
+        action_sequence = results.get('action_sequence', [])
+        print(f"[DEBUG] 使用action_sequence构建执行计划，动作数量: {len(action_sequence)}")
+
+        # 建立临时的UAV和目标状态，以正确模拟资源消耗
+        temp_uav_resources = {u.id: u.initial_resources.copy().astype(float) for u in uavs}
+        temp_target_needs = {t.id: t.resources.copy().astype(float) for t in targets}
+
         for step, action_idx in enumerate(action_sequence):
-            # 这里需要根据具体的动作编码方式来解析
-            # 简化处理：假设动作索引可以解析为(target_id, uav_id, phi_idx)
             try:
-                # 基本的动作解析（需要根据实际编码调整）
+                # (内部逻辑保持不变，但下面的 resource_cost 计算已修正)
                 n_uavs = len(uavs)
                 n_targets = len(targets)
-                n_phi = getattr(self.config, 'GRAPH_N_PHI', 8)
+                n_phi = getattr(self.config, 'GRAPH_N_PHI', 1)
                 
                 if n_uavs > 0 and n_targets > 0 and n_phi > 0:
                     target_idx = action_idx // (n_uavs * n_phi)
                     uav_idx = (action_idx % (n_uavs * n_phi)) // n_phi
-                    phi_idx = action_idx % n_phi
                     
                     if target_idx < n_targets and uav_idx < n_uavs:
-                        target_id = targets[target_idx].id
-                        uav_id = uavs[uav_idx].id
+                        target = targets[target_idx]
+                        uav = uavs[uav_idx]
                         
-                        # 计算更准确的距离和时间
-                        uav_pos = uavs[uav_idx].position
-                        target_pos = targets[target_idx].position
-                        # 使用距离计算服务
-                        from distance_service import get_distance_service
-                        distance_service = get_distance_service(self.config, [])  # 推理时可能没有障碍物
+                        # 正确计算本次任务的实际资源贡献
+                        uav_available = temp_uav_resources[uav.id]
+                        target_needed = temp_target_needs[target.id]
+                        actual_contribution = np.minimum(uav_available, target_needed)
                         
-                        distance = distance_service.calculate_distance(
-                            uav_pos, target_pos, mode='planning'
-                        )
+                        # 更新临时状态以备后续任务使用
+                        temp_uav_resources[uav.id] -= actual_contribution
+                        temp_target_needs[target.id] -= actual_contribution
+                        
+                        distance = np.linalg.norm(uav.position - target.position)
                         speed = 15.0
-                        travel_time = distance / speed
                         
-                        # 生成平滑路径点（改进的曲线插值）
-                        num_points = max(5, int(distance / 30))  # 每30米一个点，增加密度
-                        path_points = []
-                        
-                        # 添加一些随机偏移来模拟更真实的路径规划
-                        for i in range(num_points + 1):
-                            t = i / num_points
-                            # 基础直线插值
-                            base_point = uav_pos + t * (target_pos - uav_pos)
-                            
-                            # 添加轻微的曲线偏移（避障效果）
-                            if i > 0 and i < num_points:
-                                # 垂直于直线方向的偏移
-                                direction = target_pos - uav_pos
-                                perpendicular = np.array([-direction[1], direction[0]])
-                                perpendicular = perpendicular / np.linalg.norm(perpendicular) if np.linalg.norm(perpendicular) > 0 else perpendicular
-                                
-                                # 使用正弦函数创建平滑曲线
-                                curve_offset = np.sin(t * np.pi) * 20  # 最大偏移20米
-                                base_point += perpendicular * curve_offset
-                            
-                            path_points.append(base_point)
-                        
-                        # 创建任务条目
                         task = {
-                            'target_id': target_id,
+                            'target_id': target.id,
                             'step': step + 1,
                             'distance': distance,
                             'speed': speed,
-                            'arrival_time': step * travel_time,  # 基于实际飞行时间
+                            'arrival_time': step * (distance / speed),
                             'is_sync_feasible': True,
-                            'resource_cost': np.minimum(uavs[uav_idx].initial_resources, targets[target_idx].resources),
-                            'path_points': np.array(path_points)
+                            # 使用正确计算的实际贡献作为 resource_cost
+                            'resource_cost': actual_contribution,
                         }
-                        
-                        final_plan[uav_id].append(task)
+                        final_plan[uav.id].append(task)
             except Exception as e:
                 print(f"解析动作 {action_idx} 时出错: {e}")
                 continue
@@ -750,20 +797,30 @@ class ModelEvaluator:
         uavs, targets, obstacles = self._load_scenario(scenario_name)
         
         if len(model_paths) == 1:
-            # 单模型推理（使用Softmax采样）
             results = self._single_model_inference(model_paths[0], uavs, targets, obstacles, scenario_name)
         else:
-            # 集成推理（集成Softmax）
             results = self._ensemble_inference(model_paths, uavs, targets, obstacles, scenario_name)
         
         end_time = time.time()
         self.evaluation_stats['evaluation_time'] = end_time - start_time
         
-        # 处理评估结果
-        self._process_evaluation_results(results)
-
-        # 使用PlanVisualizer和ResultSaver生成完整的可视化结果
+        # --- 单一数据源处理流程 ---
         if results:
+            # 1. 重建带有正确资源消耗的规划方案
+            final_plan = self._convert_results_to_plan(results, uavs, targets)
+            
+            # 2. 调用权威评估函数，生成唯一的评估指标
+            evaluation_metrics = evaluate_plan(
+                final_plan, uavs, targets, final_uav_states=results.get('final_uav_states')
+            )
+            
+            # 3. 将权威评估结果合并到results中，作为唯一数据源
+            results.update(evaluation_metrics)
+
+            # 4. 处理评估结果（用于控制台输出）
+            self._process_evaluation_results(results)
+
+            # 5. 生成完整的可视化结果（用于报告和图片）
             self._generate_complete_visualization(scenario_name, inference_mode, uavs, targets, obstacles, results, suffix)
 
         print(f"\n评估完成! 总耗时: {self.evaluation_stats['evaluation_time']:.2f}秒")
@@ -1236,20 +1293,58 @@ class ModelEvaluator:
                 if done or truncated:
                     break
         
-        # 计算完成率 - 修复：使用标准评估指标的计算方式
-        # 基于资源贡献与需求的比率，而不是简单的目标数量比率
-        total_demand = np.sum([t.resources for t in env.targets], axis=0)
-        total_demand_safe = np.maximum(total_demand, 1e-6)
+        # 【重要修复】以推理结果为准，记录推理结束时的任务分配方案
+        # 推理过程已经完成了任务分配决策，实际执行只是进行路径规划等后续工作
         
-        # 计算实际资源贡献 - 修复：确保使用float类型避免数据类型不匹配
+        # 计算推理结束时的完成率（基于推理结果）
+        total_demand = np.sum([t.resources for t in env.targets], axis=0)
         total_contribution = np.zeros_like(total_demand, dtype=np.float64)
         for target in env.targets:
             target_contribution = target.resources - target.remaining_resources
             total_contribution += target_contribution.astype(np.float64)
         
-        # 使用标准评估指标的计算方式
-        completion_rate = np.mean(np.minimum(total_contribution, total_demand) / total_demand_safe)
+        total_demand_sum = np.sum(total_demand)
+        total_contribution_sum = np.sum(total_contribution)
+        completion_rate = total_contribution_sum / total_demand_sum if total_demand_sum > 0 else 1.0
         
+        # 【调试】显示推理结束时的任务分配结果
+        print(f"[DEBUG] 推理任务分配结果:")
+        print(f"  - 总需求: {total_demand} (总和: {total_demand_sum})")
+        print(f"  - 推理分配总贡献: {total_contribution} (总和: {total_contribution_sum})")
+        print(f"  - 推理完成率: {completion_rate:.4f}")
+        
+        # 计算目标完成率（完全满足的目标数量比例）
+        satisfied_targets = sum(1 for t in env.targets if np.all(t.remaining_resources <= 1e-6))
+        total_targets = len(env.targets)
+        target_completion_rate = satisfied_targets / total_targets if total_targets > 0 else 1.0
+        print(f"  - 推理时完全满足目标数: {satisfied_targets}/{total_targets}")
+        print(f"  - 推理时目标完成率: {target_completion_rate:.4f}")
+        
+        # 显示每个目标的详细状态
+        for i, target in enumerate(env.targets):
+            remaining = target.remaining_resources
+            is_satisfied = np.all(remaining <= 1e-6)
+            print(f"  - 目标{i+1}: 剩余需求{remaining}, 完全满足: {is_satisfied}")
+        
+        # 记录推理结束时的任务分配方案
+        inference_task_assignments = {}
+        for uav in env.uavs:
+            inference_task_assignments[uav.id] = {
+                'initial_resources': uav.initial_resources.copy(),
+                'final_resources': uav.resources.copy(),
+                'consumed_resources': uav.initial_resources - uav.resources
+            }
+        
+        inference_target_status = {}
+        for target in env.targets:
+            inference_target_status[target.id] = {
+                'required_resources': target.resources.copy(),
+                'remaining_resources': target.remaining_resources.copy(),
+                'contributed_resources': target.resources - target.remaining_resources
+            }
+        
+        print(f"[DEBUG] 推理任务分配方案已记录，包含{len(inference_task_assignments)}个UAV和{len(inference_target_status)}个目标")
+    
         # 添加调试信息：显示动作序列
         if self.config.ENABLE_DEBUG:
             print(f"\n[DEBUG] 推理完成，动作序列: {action_sequence}")
@@ -1266,11 +1361,13 @@ class ModelEvaluator:
         
         return {
             'total_reward': total_reward,
-            'completion_rate': completion_rate,
+            'completion_rate': completion_rate,  # 基于推理结果计算的完成率
             'step_count': step_count,
             'action_sequence': action_sequence,
             'final_state': state,
-            'final_uav_states': final_uav_states
+            'final_uav_states': final_uav_states,
+            'inference_task_assignments': inference_task_assignments,  # 推理任务分配方案
+            'inference_target_status': inference_target_status  # 推理目标状态
         }
     
     def _run_ensemble_inference(self, networks, env, scenario_name='easy'):
@@ -1421,9 +1518,11 @@ class ModelEvaluator:
             target_contribution = target.resources - target.remaining_resources
             total_contribution += target_contribution.astype(np.float64)
         
-        # 使用标准评估指标的计算方式
-        completion_rate = np.mean(np.minimum(total_contribution, total_demand) / total_demand_safe)
-        
+            # 【修改】使用“总贡献/总需求”的标准方法计算完成率
+            total_demand_sum = np.sum(total_demand)
+            total_contribution_sum = np.sum(np.minimum(total_contribution, total_demand))
+            completion_rate = total_contribution_sum / total_demand_sum if total_demand_sum > 0 else 1.0
+       
         # 添加调试信息：显示动作序列
         if self.config.ENABLE_DEBUG:
             print(f"\n[DEBUG] 集成推理完成，动作序列: {action_sequence}")
@@ -1463,7 +1562,7 @@ class ModelEvaluator:
         
         print(f"\n评估结果:"
             f"  总奖励: {results['total_reward']:.2f}"
-            f"  完成率: {results['completion_rate']:.3f}"
+            f"  满足率: {results['completion_rate']:.3f}"
             f"  步数: {results['step_count']}"
             f"  效率: {efficiency:.2f}")
         
