@@ -1087,7 +1087,7 @@ class ModelTrainer:
 
     def log_action_details(self, episode, step, valid_actions, chosen_action, env, reward=None, step_info=None, 
                           pre_action_completion_rate=None, post_action_completion_rate=None, 
-                          uav_resources_snapshot=None, uav_positions_snapshot=None, q_values=None): # [新增] 接收快照参数
+                          state_snapshot=None, q_values=None): # [新增] 接收快照参数
         """
         记录当前步骤的详细决策信息：有哪些可选动作，最终选了哪个，包含完成率和奖励信息。
         
@@ -1106,7 +1106,7 @@ class ModelTrainer:
         if not self.action_logger:
             return
         # 如果没有传入位置快照，为了兼容性，使用当前位置
-        if uav_positions_snapshot is None:
+        if state_snapshot is None:
             uav_positions_snapshot = {uav.id: uav.current_position for uav in env.uavs}
 
         # [调试] 检查目标需求异常和验证动作解码一致性
@@ -1121,7 +1121,7 @@ class ModelTrainer:
         target_resources_snapshot = {target.id: target.remaining_resources.copy() for target in env.targets}
         
         # 如果没有传入UAV资源快照，创建当前状态快照（用于调试）
-        if uav_resources_snapshot is None:
+        if state_snapshot is None:
             uav_resources_snapshot = {uav.id: uav.resources.copy() for uav in env.uavs}
             print("警告: 没有传入UAV资源快照，使用当前状态（可能是执行后状态）")
 
@@ -1171,13 +1171,15 @@ class ModelTrainer:
 
                     target = env.targets[target_idx]
                     uav = env.uavs[uav_idx]
+                    
                     # distance = np.linalg.norm(uav.current_position - target.position)
                     uav_pos_before = uav_positions_snapshot.get(uav.id, uav.current_position) # <--- 使用快照中的位置
                     distance = np.linalg.norm(uav_pos_before - target.position) # <--- 使用快照中的位置计算距离
                     
-                    # 使用快照中的执行前状态
-                    uav_res_before = uav_resources_snapshot.get(uav.id, np.array([-1, -1]))
-                    target_need_before = target_resources_snapshot.get(target.id, np.array([-1, -1]))
+                    
+                    # [修改] 所有“执行前”状态均从快照获取，确保时间点一致
+                    uav_res_before = state_snapshot['uav_resources'][uav.id]
+                    target_need_before = state_snapshot['target_needs'][target.id]
                     
                     # 计算潜在贡献
                     potential_contribution = np.minimum(uav_res_before, target_need_before)
@@ -1215,8 +1217,11 @@ class ModelTrainer:
                 chosen_q_value_str = f" | Q={chosen_q_val:8.4f}"
 
             # 使用快照数据计算预期贡献
-            uav_res_before = uav_resources_snapshot.get(env.uavs[uav_idx].id, np.array([0, 0]))
-            target_need_before = target_resources_snapshot.get(env.targets[target_idx].id, np.array([0, 0]))
+            # uav_res_before = uav_resources_snapshot.get(env.uavs[uav_idx].id, np.array([0, 0]))  #从环境读取
+            # target_need_before = target_resources_snapshot.get(env.targets[target_idx].id, np.array([0, 0]))
+            uav_res_before = state_snapshot['uav_resources'][chosen_uav.id]
+            target_need_before = state_snapshot['target_needs'][chosen_target.id]
+
             expected_contribution = np.minimum(uav_res_before, target_need_before)
             
             self.action_logger.info(

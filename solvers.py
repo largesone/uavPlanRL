@@ -58,7 +58,7 @@ class DQN(nn.Module):
 
 class GraphRLSolver:
     """(已修订) 基于图和深度强化学习的无人机任务分配求解器"""
-    def __init__(self, uavs, targets, graph, obstacles, i_dim, h_dim, o_dim, config, obs_mode="flat"):
+    def __init__(self, uavs, targets, graph, obstacles, i_dim, h_dim, o_dim, config, obs_mode="graph"):
         self.uavs, self.targets, self.graph, self.obstacles, self.config = uavs, targets, graph, obstacles, config
         self.obs_mode = obs_mode
         self.env = UAVTaskEnv(uavs, targets, graph, obstacles, config, obs_mode=obs_mode)
@@ -103,7 +103,10 @@ class GraphRLSolver:
             processed_state = self._process_graph_state(state)
         else:
             # 扁平模式：直接处理张量
-            if isinstance(state, np.ndarray):
+            if isinstance(state, dict):
+                # 如果状态是字典但obs_mode不是graph，按图模式处理
+                processed_state = self._process_graph_state(state)
+            elif isinstance(state, np.ndarray):
                 processed_state = torch.FloatTensor(state).unsqueeze(0).to(self.device)
             else:
                 processed_state = state.unsqueeze(0).to(self.device) if state.dim() == 1 else state.to(self.device)
@@ -182,7 +185,7 @@ class GraphRLSolver:
         batch = tuple(zip(*transitions))
         
         # 处理状态批次
-        if self.obs_mode == "graph":
+        if self.obs_mode == "graph" or isinstance(batch[0][0], dict):
             # 图模式：合并字典状态
             state_batch = self._merge_graph_states(batch[0])
             next_states_batch = self._merge_graph_states(batch[3])
@@ -210,7 +213,7 @@ class GraphRLSolver:
         non_final_mask = ~done_batch
         
         if non_final_mask.sum() > 0:
-            if self.obs_mode == "graph":
+            if self.obs_mode == "graph" or isinstance(next_states_batch, dict):
                 # 图模式：提取非终止状态
                 non_final_next_states = self._extract_non_final_graph_states(next_states_batch, non_final_mask)
             else:
@@ -511,9 +514,12 @@ class GraphRLSolver:
 
             while True:
                 # 步骤1: 创建UAV资源状态的快照
-                uav_resources_snapshot = {uav.id: uav.resources.copy() for uav in self.env.uavs}
-                uav_positions_snapshot = {uav.id: uav.current_position.copy() for uav in self.env.uavs} # <--- 新增此行
-                
+                # [修改] 步骤1: 创建包含UAV和Target的完整状态快照
+                state_snapshot = {
+                    'uav_resources': {uav.id: uav.resources.copy() for uav in self.env.uavs},
+                    'uav_positions': {uav.id: uav.current_position.copy() for uav in self.env.uavs},
+                    'target_needs': {target.id: target.remaining_resources.copy() for target in self.env.targets}
+                }
                 # 1. 首先获取有效动作列表，用于日志记录
                 action_mask = self.env.get_action_mask()
                 valid_indices = np.where(action_mask)[0]
@@ -648,8 +654,7 @@ class GraphRLSolver:
                         step_info=step_info,                        
                         pre_action_completion_rate=pre_action_completion_rate,
                         post_action_completion_rate=post_action_completion_rate,
-                        uav_resources_snapshot=uav_resources_snapshot, # [新增] 传递快照
-                        uav_positions_snapshot=uav_positions_snapshot,
+                        state_snapshot=state_snapshot, # [修改] 传递完整的状态快照
                         q_values=q_values  # [新增] 将Q值张量传递给日志函数
                     ) 
                 # 动作监控和计数逻辑（带错误处理）
