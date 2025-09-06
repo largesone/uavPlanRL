@@ -978,10 +978,10 @@ class ModelTrainer:
         print("=" * 60)
         
 
-        self._init_action_log(scenario_name)
-
         # 设置训练模式标识
         self._is_curriculum = use_curriculum
+        
+        self._init_action_log(scenario_name)
         self._scenario_name = scenario_name
         # 设置当前场景名称供其他方法使用
         self._current_scenario_name = scenario_name
@@ -1105,9 +1105,18 @@ class ModelTrainer:
         """
         if not self.action_logger:
             return
-        # 如果没有传入位置快照，为了兼容性，使用当前位置
+        # 初始化快照变量
         if state_snapshot is None:
+            # 如果没有传入状态快照，创建当前状态快照（用于调试）
+            uav_resources_snapshot = {uav.id: uav.resources.copy() for uav in env.uavs}
             uav_positions_snapshot = {uav.id: uav.current_position for uav in env.uavs}
+            target_resources_snapshot = {target.id: target.remaining_resources.copy() for target in env.targets}
+            print("警告: 没有传入UAV资源快照，使用当前状态（可能是执行后状态）")
+        else:
+            # 使用传入的状态快照
+            uav_resources_snapshot = state_snapshot['uav_resources']
+            uav_positions_snapshot = state_snapshot['uav_positions']
+            target_resources_snapshot = state_snapshot['target_needs']
 
         # [调试] 检查目标需求异常和验证动作解码一致性
         target_idx, uav_idx, phi_idx = env.decode_action(chosen_action)
@@ -1116,14 +1125,6 @@ class ModelTrainer:
         # [调试] 检查选中目标的状态
         chosen_target = env.targets[target_idx]
         self.action_logger.info(f"[DEBUG] 选中目标({target_idx}): remaining={chosen_target.remaining_resources}, original={chosen_target.resources}")
-        
-        # 创建目标需求状态的快照（动作执行前的状态）- 修复问题2
-        target_resources_snapshot = {target.id: target.remaining_resources.copy() for target in env.targets}
-        
-        # 如果没有传入UAV资源快照，创建当前状态快照（用于调试）
-        if state_snapshot is None:
-            uav_resources_snapshot = {uav.id: uav.resources.copy() for uav in env.uavs}
-            print("警告: 没有传入UAV资源快照，使用当前状态（可能是执行后状态）")
 
         # 使用传入的动作前完成率，如果没有则获取当前完成率
         if pre_action_completion_rate is not None:
@@ -1177,9 +1178,9 @@ class ModelTrainer:
                     distance = np.linalg.norm(uav_pos_before - target.position) # <--- 使用快照中的位置计算距离
                     
                     
-                    # [修改] 所有“执行前”状态均从快照获取，确保时间点一致
-                    uav_res_before = state_snapshot['uav_resources'][uav.id]
-                    target_need_before = state_snapshot['target_needs'][target.id]
+                    # [修改] 所有"执行前"状态均从快照获取，确保时间点一致
+                    uav_res_before = uav_resources_snapshot[uav.id]
+                    target_need_before = target_resources_snapshot[target.id]
                     
                     # 计算潜在贡献
                     potential_contribution = np.minimum(uav_res_before, target_need_before)
@@ -1793,6 +1794,10 @@ class ModelTrainer:
         # 确保solver使用正确的环境
         solver.env = env
         
+        # 绑定日志记录器
+        solver.step_logger = self.log_step_reward
+        solver.action_logger = self.log_action_details
+        
         total_episodes = self.config.training_config.episodes
         best_reward = float('-inf')
         
@@ -1844,6 +1849,10 @@ class ModelTrainer:
                     solver.targets = new_targets
                     solver.graph = new_graph
                     solver.env = new_env
+                    
+                    # 重新绑定日志记录器（环境更新后需要重新绑定）
+                    solver.step_logger = self.log_step_reward
+                    solver.action_logger = self.log_action_details
                     
                     # 更新当前场景变量
                     uavs, targets, obstacles = new_uavs, new_targets, new_obstacles
@@ -2139,6 +2148,10 @@ class ModelTrainer:
                 # 更新solver的环境
                 graph = DirectedGraph(uavs, targets, self.config.GRAPH_N_PHI, obstacles, self.config)
                 solver.env = UAVTaskEnv(uavs, targets, graph, obstacles, self.config, obs_mode="graph")
+                
+                # 重新绑定日志记录器（环境更新后需要重新绑定）
+                solver.step_logger = self.log_step_reward
+                solver.action_logger = self.log_action_details
 
                 # --- 2.4.2. 单个训练回合的核心逻辑 ---
                 state, _ = solver.env.reset(options={'scenario': scenario_dict, 'scenario_name': scenario_name})
@@ -2147,8 +2160,57 @@ class ModelTrainer:
                 episode_losses = []
 
                 while True:
-                    action, _ = solver.select_action(state)
+                    # 获取动作掩码和有效动作
+                    action_mask = solver.env.get_action_mask()
+                    valid_indices = np.where(action_mask)[0]
+                    
+                    action, q_values = solver.select_action(state)
                     next_state, reward, done, truncated, info = solver.env.step(action.item())
+
+                    # 计算动作执行前后的完成率
+                    pre_action_completion_rate = None
+                    if hasattr(solver.env, 'get_completion_rate'):
+                        pre_action_completion_rate = solver.env.get_completion_rate()
+                    else:
+                        completed_targets_pre = sum(1 for t in solver.env.targets if np.all(t.remaining_resources <= 0))
+                        pre_action_completion_rate = completed_targets_pre / len(solver.env.targets)
+                    
+                    post_action_completion_rate = None
+                    if hasattr(solver.env, 'get_completion_rate'):
+                        post_action_completion_rate = solver.env.get_completion_rate()
+                    else:
+                        completed_targets_post = sum(1 for t in solver.env.targets if np.all(t.remaining_resources <= 0))
+                        post_action_completion_rate = completed_targets_post / len(solver.env.targets)
+                    
+                    # 调用动作日志记录
+                    if hasattr(solver, 'action_logger') and solver.action_logger is not None:
+                        # 准备步骤信息，包含奖励分解
+                        step_info = {
+                            'reward_breakdown': info.get('reward_breakdown', {}),
+                            'base_reward': info.get('base_reward', reward * 0.8),
+                            'shaping_reward': info.get('shaping_reward', reward * 0.2)
+                        }
+                        
+                        # 创建状态快照（动作执行前的状态）
+                        state_snapshot = {
+                            'uav_positions': {uav.id: uav.current_position for uav in solver.env.uavs},
+                            'uav_resources': {uav.id: uav.resources.copy() for uav in solver.env.uavs},
+                            'target_needs': {target.id: target.remaining_resources.copy() for target in solver.env.targets}
+                        }
+                        
+                        solver.action_logger(
+                            episode=global_episode_counter,
+                            step=step_count,
+                            valid_actions=valid_indices,
+                            chosen_action=action.item(),
+                            env=solver.env,
+                            reward=reward,
+                            step_info=step_info,
+                            pre_action_completion_rate=pre_action_completion_rate,
+                            post_action_completion_rate=post_action_completion_rate,
+                            state_snapshot=state_snapshot,  # 传递状态快照
+                            q_values=q_values
+                        )
 
                     episode_reward += reward
                     total_base_reward += info.get('base_reward', 0.0)
@@ -2314,6 +2376,10 @@ class ModelTrainer:
         solver = GraphRLSolver(uavs, targets, graph, obstacles, i_dim, 
                               [self.config.hyperparameters.hidden_dim], o_dim, self.config, obs_mode=obs_mode)
         
+        # 绑定日志记录器
+        solver.step_logger = self.log_step_reward
+        solver.action_logger = self.log_action_details
+        
         global_episode_counter = 0
         best_reward = float('-inf')
         
@@ -2442,6 +2508,10 @@ class ModelTrainer:
             solver = GraphRLSolver(uavs, targets, graph, obstacles, i_dim, 
                                   [self.config.hyperparameters.hidden_dim], o_dim, self.config, obs_mode=obs_mode)
             solver.env = env
+            
+            # 绑定日志记录器
+            solver.step_logger = self.log_step_reward
+            solver.action_logger = self.log_action_details
         else:
             # 修复：正确更新现有solver的环境（与动态随机训练保持一致）
             graph = DirectedGraph(uavs, targets, self.config.GRAPH_N_PHI, obstacles, self.config)
@@ -2458,6 +2528,10 @@ class ModelTrainer:
             new_env._is_curriculum_training = getattr(self, '_is_curriculum', True)
             new_env._current_curriculum_stage = stage_name
             solver.env = new_env
+            
+            # 重新绑定日志记录器（环境更新后需要重新绑定）
+            solver.step_logger = self.log_step_reward
+            solver.action_logger = self.log_action_details
         
         # 开始回合日志记录
         self.start_episode_log(episode_num)
