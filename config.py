@@ -136,7 +136,7 @@ class Config:
         
         # ----- 分级日志输出控制配置 -----
         # 日志输出级别控制 ('minimal', 'simple', 'detailed', 'debug')
-        self.LOG_LEVEL = 'simple'# 'detailed'#                      # 默认简洁模式
+        self.LOG_LEVEL = 'detailed'#'simple'#                       # 默认简洁模式
         self.LOG_EPISODE_DETAIL = False                # 是否输出轮次内步的详细信息
         self.LOG_REWARD_DETAIL = False                  # 是否输出奖励分解详细信息
         

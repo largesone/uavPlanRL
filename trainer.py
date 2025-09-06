@@ -2124,7 +2124,7 @@ class ModelTrainer:
                 solver.env = UAVTaskEnv(uavs, targets, graph, obstacles, self.config, obs_mode="graph")
 
                 # --- 2.4.2. 单个训练回合的核心逻辑 ---
-                state, _ = solver.env.reset(options={'scenario': scenario_dict})
+                state, _ = solver.env.reset(options={'scenario': scenario_dict, 'scenario_name': scenario_name})
                 episode_reward, step_count = 0.0, 0
                 total_base_reward, total_shaping_reward = 0.0, 0.0
                 episode_losses = []
@@ -2246,6 +2246,24 @@ class ModelTrainer:
                             'threshold_passed': current_threshold
                         }
                         break 
+                
+                # [新增] 在每轮课程学习结束后，调用函数保存场景和推理结果数据
+                # 这样可以确保scenario_logs文件夹中有记录
+                try:
+                    # 构建episode_info以生成推理报告
+                    episode_info = {'final_env': solver.env} # 简化处理，传递最终环境
+                    self.save_scenario_data(
+                        episode=global_episode_counter,
+                        uavs=uavs,
+                        targets=targets,
+                        obstacles=obstacles,
+                        scenario_name=scenario_name,
+                        solver=solver, # 传递solver以获取推理结果
+                        completion_rate=completion_rate,
+                        episode_info=episode_info
+                    )
+                except Exception as e:
+                    print(f"在课程学习中保存场景数据失败: {e}")
 
             # --- 2.5. 等级训练结束总结 ---
             level_duration = time.time() - level_start_time

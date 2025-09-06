@@ -2484,18 +2484,45 @@ class UAVTaskEnv(gym.Env):
                         if not (np.isnan(distance) or np.isinf(distance)):
                             candidate_uavs_with_dist.append((i, distance))
 
-                # [核心修正] 步骤 2: 按距离对所有候选无人机进行排序
-                candidate_uavs_with_dist.sort(key=lambda x: x[1])
-                
-                # [核心修正] 步骤 3: 从排序后的列表中选择前K个
-                top_k_count = min(k, len(candidate_uavs_with_dist))
-                
-                # 返回最终筛选出的无人机索引列表
-                return [uav_idx for uav_idx, _ in candidate_uavs_with_dist[:top_k_count]]
+                # [核心修正] 步骤 2 & 3: 计算综合效用分并排序，选择前K个
+                candidate_uavs_with_scores = []
+                for uav_idx, distance in candidate_uavs_with_dist:
+                    uav = self.uavs[uav_idx]
+                    
+                    # 计算资源匹配度 (越小越好)
+                    # 惩罚那些资源远多于需求的UAV，鼓励精确匹配
+                    contribution = np.minimum(uav.resources, target.remaining_resources)
+                    total_contribution = np.sum(contribution)
+                    total_need = np.sum(target.remaining_resources)
+                    
+                    if total_need > 0:
+                        # 资源匹配度：1 - (贡献 / 需求)，值越小说明越匹配
+                        resource_match_score = 1.0 - (total_contribution / total_need)
+                    else:
+                        resource_match_score = 1.0 # 如果目标无需求，则匹配度最低
 
+                    # 归一化距离 (0-1)
+                    normalized_distance = distance / self.config.MAP_SIZE
+                    
+                    # 定义权重
+                    w_dist = 0.6  # 距离权重占60%
+                    w_res = 0.4   # 资源匹配权重占40%
+                    
+                    # 综合效用分 (分数越低越优)
+                    utility_score = w_dist * normalized_distance + w_res * resource_match_score
+                    candidate_uavs_with_scores.append((uav_idx, utility_score))
+
+                # 按综合效用分排序 (升序)
+                candidate_uavs_with_scores.sort(key=lambda x: x[1])
+                
+                top_k_count = min(k, len(candidate_uavs_with_scores))
+                
+                # 返回效用分最高的无人机索引列表
+                return [uav_idx for uav_idx, _ in candidate_uavs_with_scores[:top_k_count]]
             except Exception as e:
                 print(f"严重错误: Top-K 筛选方法出现异常: {e}，回退到返回所有无人机索引。")
                 return list(range(len(self.uavs)))
+
     
     def get_action_mask(self):
         """
