@@ -762,236 +762,6 @@ class UAVTaskEnv(gym.Env):
                     # assert np.isfinite(value).all(), f"FATAL: State[{key}] contains Infinity!"
                     pass
 
-    # def step(self, action):
-    #     """执行一步动作 - 支持可选PBRS的稳定版本"""
-    #     self.step_count += 1
-        
-    #     # === PBRS 前置计算 (保留原逻辑) ===
-    #     enable_pbrs = getattr(self.config, 'ENABLE_PBRS', False)
-    #     potential_before = 0.0
-    #     if enable_pbrs:
-    #         potential_before = self._calculate_potential()
-        
-    #     # 转换动作
-    #     target_idx, uav_idx, phi_idx = self._action_to_assignment(action)
-    #     target = self.targets[target_idx]
-    #     uav = self.uavs[uav_idx]
-        
-    #     # 由于动作掩码已经保证了动作的有效性，这里直接计算实际贡献
-    #     # 移除了原有的无效动作检查逻辑，提升训练效率
-    #     actual_contribution = np.minimum(uav.resources, target.remaining_resources)
-        
-    #     # [新增] 调试断言，确保贡献值不为负
-    #     assert np.all(actual_contribution >= 0), f"贡献值出现负数: {actual_contribution}"        
-
-    #     # 记录目标完成前的状态
-    #     was_satisfied = np.all(target.remaining_resources <= 0)
-        
-    #     # [新增] 记录更新前的资源，用于验证
-    #     uav_res_before = uav.resources.copy()
-    #     target_need_before = target.remaining_resources.copy()        
-        
-        
-    #     # 计算路径长度
-    #     path_len = np.linalg.norm(np.array(uav.current_position) - np.array(target.position))
-    #     travel_time = path_len / uav.velocity_range[1] if uav.velocity_range[1] > 0 else 0.0
-        
-    #     # 更新状态
-    #     uav.resources = uav.resources.astype(np.float64) - actual_contribution.astype(np.float64)
-    #     target.remaining_resources = target.remaining_resources.astype(np.float64) - actual_contribution.astype(np.float64)
-        
-    #     if uav.id not in {a[0] for a in target.allocated_uavs}:
-    #         target.allocated_uavs.append((uav.id, phi_idx))
-    #     uav.task_sequence.append((target_idx, phi_idx))
-    #     uav.current_position = np.array(target.position).copy()
-    #     uav.heading = phi_idx * (2 * np.pi / self.graph.n_phi)
-        
-    #     # 检查是否完成所有目标
-    #     total_satisfied = sum(np.all(t.remaining_resources <= 0) for t in self.targets)
-    #     total_targets = len(self.targets)
-    #     done = bool(total_satisfied == total_targets)
-        
-    #     # === 可选PBRS：记录动作后势能并计算塑形奖励 ===
-    #     potential_after = 0.0
-    #     shaping_reward = 0.0
-        
-    #     if enable_pbrs:
-    #         if pbrs_type == 'simple':
-    #             potential_after = self._calculate_simple_potential()
-    #         elif pbrs_type == 'progress':
-    #             potential_after = self._calculate_progress_potential()
-    #         elif pbrs_type == 'synergy':
-    #             potential_after = self._calculate_potential()  # 新的协同战备势函数
-    #         else:
-    #             potential_after = self._calculate_potential()  # 默认使用协同战备势函数
-            
-    #         # 计算PBRS塑形奖励：γ * Φ(s') - Φ(s)
-    #         gamma = getattr(self.config, 'GAMMA', 0.99)
-    #         raw_shaping_reward = gamma * potential_after - potential_before
-            
-    #         # 添加数值稳定性检查和裁剪
-    #         if np.isnan(raw_shaping_reward) or np.isinf(raw_shaping_reward):
-    #             shaping_reward = 0.0
-    #             print(f"警告: 塑形奖励为NaN/Inf，已重置为0")
-    #         else:
-    #             # 裁剪塑形奖励到合理范围
-    #             clip_min = getattr(self.config, 'PBRS_REWARD_CLIP_MIN', -5.0)  # 更保守的裁剪范围
-    #             clip_max = getattr(self.config, 'PBRS_REWARD_CLIP_MAX', 5.0)
-    #             shaping_reward = np.clip(raw_shaping_reward, clip_min, clip_max)
-        
-    #     # 计算基础奖励 - 根据网络类型选择奖励函数
-    #     network_type = getattr(self.config, 'NETWORK_TYPE', 'FCN')
-    #     if network_type == 'ZeroShotGNN':
-    #         # 使用双层奖励函数，提供详细的奖励分解
-    #         # [修改] 将action作为参数传入，用于计算“持续探索”奖励
-    #         base_reward = self._calculate_synergistic_reward(target, uav, actual_contribution, path_len, 
-    #                                                        was_satisfied, travel_time, done, action)
-    #     else:
-    #         # 其他网络使用简单奖励函数
-    #         base_reward = self._calculate_simple_reward(target, uav, actual_contribution, path_len, 
-    #                                                    was_satisfied, travel_time, done)
-        
-    #     # 总奖励 = 基础奖励 + 塑形奖励
-    #     raw_total_reward = base_reward + shaping_reward
-        
-    #     # 应用奖励归一化（紧急稳定性修复）
-    #     total_reward = raw_total_reward
-    #     if getattr(self.config, 'REWARD_NORMALIZATION', False):
-    #         reward_scale = getattr(self.config, 'REWARD_SCALE', 1.0)
-    #         total_reward *= reward_scale
-        
-    #     # 统一的最终裁剪和数值稳定性检查
-    #     if np.isnan(total_reward) or np.isinf(total_reward):
-    #         print(f"警告: 总奖励为NaN/Inf ({total_reward})，重置为0")
-    #         total_reward = 0.0
-        
-    #     # 最终裁剪：扩大奖励范围，确保奖励系统平滑且平衡
-    #     # 调整裁剪范围以适应大奖励值（最终成功奖励500.0 + 其他奖励）
-    #     clip_min = getattr(self.config, 'REWARD_CLIP_MIN', -500.0)
-    #     clip_max = getattr(self.config, 'REWARD_CLIP_MAX', 2000.0)
-    #     final_total_reward = np.clip(total_reward, clip_min, clip_max)
-        
-    #     # 获取并更新奖励分解信息，确保一致性
-    #     reward_breakdown = getattr(self, '_last_reward_breakdown', {})
-        
-    #     # 计算奖励处理信息
-    #     reward_scale = getattr(self.config, 'REWARD_SCALE', 1.0) if getattr(self.config, 'REWARD_NORMALIZATION', False) else 1.0
-    #     was_clipped = final_total_reward != total_reward
-        
-    #     # 更新奖励分解信息 - 增强版日志记录
-    #     if reward_breakdown:
-    #         # 获取Base奖励的裁剪信息
-    #         base_pre_clip = reward_breakdown.get('raw_total_reward', base_reward)
-    #         base_post_clip = reward_breakdown.get('base_reward', base_reward)
-    #         base_was_clipped = reward_breakdown.get('was_base_clipped', False)
-            
-    #         reward_breakdown.update({
-    #             'raw_total_reward': raw_total_reward,
-    #             'pre_clip_reward': total_reward,  # 裁剪前的奖励值
-    #             'post_clip_reward': final_total_reward,  # 裁剪后的奖励值
-    #             'normalized_reward': total_reward,
-    #             'final_total_reward': final_total_reward,
-    #             'reward_scale': reward_scale,
-    #             'was_clipped': was_clipped,
-    #             'clip_amount': total_reward - final_total_reward if was_clipped else 0.0,  # 裁剪量
-    #             'clip_min': clip_min,
-    #             'clip_max': clip_max,
-    #             'clip_effectiveness': 'effective' if was_clipped else 'no_clip_needed',  # 裁剪有效性
-    #             # Base奖励的裁剪信息
-    #             'base_pre_clip': base_pre_clip,
-    #             'base_post_clip': base_post_clip,
-    #             'was_base_clipped': base_was_clipped
-    #         })
-    #     else:
-    #         # 如果没有分解信息，创建基本的处理信息
-    #         reward_breakdown = {
-    #             'raw_total_reward': raw_total_reward,
-    #             'pre_clip_reward': total_reward,
-    #             'post_clip_reward': final_total_reward,
-    #             'normalized_reward': total_reward,
-    #             'final_total_reward': final_total_reward,
-    #             'reward_scale': reward_scale,
-    #             'was_clipped': was_clipped,
-    #             'clip_amount': total_reward - final_total_reward if was_clipped else 0.0,
-    #             'clip_min': clip_min,
-    #             'clip_max': clip_max,
-    #             'clip_effectiveness': 'effective' if was_clipped else 'no_clip_needed',
-    #             # Base奖励的基本信息（如果没有详细分解）
-    #             'base_pre_clip': base_reward,
-    #             'base_post_clip': base_reward,
-    #             'was_base_clipped': False
-    #         }
-        
-    #     # 检查是否超时
-    #     truncated = self.step_count >= self.max_steps
-        
-    #     # 构建详细信息字典
-    #     info = {
-    #         'target_id': int(target_idx),
-    #         'uav_id': int(uav_idx),
-    #         'phi_idx': int(phi_idx),
-    #         'actual_contribution': float(np.sum(actual_contribution)),
-    #         'path_length': float(path_len),
-    #         'travel_time': float(travel_time),
-    #         'done': bool(done),
-            
-    #         # PBRS相关信息
-    #         'pbrs_enabled': enable_pbrs,
-    #         'base_reward': float(base_reward),
-    #         'shaping_reward': float(shaping_reward),
-    #         'potential_before': float(potential_before),
-    #         'potential_after': float(potential_after),
-    #         'total_reward': float(final_total_reward),  # 使用最终的总奖励
-            
-    #         # 详细奖励分解信息
-    #         'reward_breakdown': reward_breakdown
-    #     }
-        
-    #     # 验证奖励计算的完整一致性
-    #     if getattr(self.config, 'ENABLE_REWARD_DEBUG', False):
-    #         self._validate_reward_consistency(base_reward, shaping_reward, final_total_reward, reward_breakdown)
-        
-    #     # 保存最后一步的信息供main.py使用
-    #     self._last_step_info = info
-        
-    #     # 统一汇报超出范围的动作数量
-    #     invalid_action_count = getattr(self, '_invalid_action_count', 0)
-    #     if invalid_action_count > 0:
-    #         # 减少输出频率，只在以下情况输出：
-    #         # 1. 每50步输出一次
-    #         # 2. 无效动作数量超过阈值（比如超过5个）
-    #         # 3. 在课程训练模式下，只在第一阶段输出
-    #         should_output = False
-            
-    #         # 检查是否为课程训练模式
-    #         is_curriculum = getattr(self, '_is_curriculum_training', False)
-    #         current_stage = getattr(self, '_current_curriculum_stage', 'unknown')
-            
-    #         if self.step_count % 50 == 0:  # 每50步输出一次
-    #             should_output = True
-    #         elif invalid_action_count > 5:  # 无效动作数量超过阈值
-    #             should_output = True
-    #         elif is_curriculum and current_stage == 'easy' and self.step_count % 20 == 0:  # 课程训练第一阶段
-    #             should_output = True
-            
-    #         if False: #should_output:  #屏蔽输出
-    #             # 根据训练模式提供不同的提示信息
-    #             if is_curriculum:
-    #                 print(f"课程训练[{current_stage}] - 步骤{self.step_count}: 跳过{invalid_action_count}个无效动作")
-    #             else:
-    #                 print(f"动态训练 - 步骤{self.step_count}: 跳过{invalid_action_count}个无效动作")
-            
-    #         # 重置计数器
-    #         self._invalid_action_count = 0
-        
-    #     # 奖励NaN检查已注释掉以提高训练效率
-    #     # if getattr(self.config, 'debug_mode', False):
-    #     #     assert not np.isnan(final_total_reward), "FATAL: Reward became NaN!"
-    #     #     assert np.isfinite(final_total_reward), "FATAL: Reward became Infinity!"
-        
-    #     return self._get_state(), final_total_reward, done, truncated, info
-
-
 
     def step(self, action):
         """执行一步动作 - [已修复并加入控制台调试版本]"""
@@ -1005,6 +775,7 @@ class UAVTaskEnv(gym.Env):
         log_episode_detail = getattr(self.config, 'LOG_EPISODE_DETAIL', False)
         log_reward_detail = getattr(self.config, 'LOG_REWARD_DETAIL', False)
         log_debug_detail = getattr(self.config, 'ENABLE_DEBUG', False)
+        
         
         # 只在启用奖励详情时输出步级别的详细信息
         if log_debug_detail:
@@ -1040,7 +811,15 @@ class UAVTaskEnv(gym.Env):
         # =================================================================
         # 原子性地计算资源转移向量
         resource_transfer_vector = np.minimum(uav_res_before, target_need_before)
-        
+
+        # [新增] 明确惩罚零贡献动作
+        if np.sum(resource_transfer_vector) <= 1e-6:
+            # 如果一个动作不能做出任何实际贡献，则施加惩罚并终止
+            penalty = self.config.ZERO_CONTRIBUTION_PENALTY # 从config读取惩罚值，例如 -50
+            info = {'reward_breakdown': {'零贡献惩罚': penalty}}
+            # 认为这是一个导致规划失败的动作，直接结束回合
+            return self._get_state(), penalty, True, False, info
+
         if log_debug_detail:
             print("--- Core Calculation ---"
                  f" Calculated Transfer Vector: {resource_transfer_vector}")
@@ -2545,6 +2324,12 @@ class UAVTaskEnv(gym.Env):
                     # 只对筛选后的无人机-目标组合进行有效性检查
                     for uav_idx in top_k_uav_indices:
                         try:
+                            # [新增] 如果无人机资源已耗尽，则不应再为其分配任何任务
+                            if np.all(self.uavs[uav_idx].resources <= 0):
+                                # [调试信息] 打印被跳过的无人机
+                                if self.config.ENABLE_DEBUG:
+                                    print(f"  [ACTION MASK DEBUG] 跳过UAV {self.uavs[uav_idx].id}，资源已耗尽: {self.uavs[uav_idx].resources}")
+                                continue
                             # 索引边界检查
                             if uav_idx >= len(self.uavs):
                                 # 不打印每个超出范围的无人机索引，避免大量输出

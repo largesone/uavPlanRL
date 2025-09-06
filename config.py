@@ -331,7 +331,7 @@ class Config:
         self.TARGET_COMPLETION_REWARD = 1500    # 目标完成奖励
         self.MARGINAL_UTILITY_FACTOR = 1000    # 边际效用因子
         self.EFFICIENCY_REWARD_FACTOR = 500     # 效率奖励因子
-        self.DISTANCE_PENALTY_FACTOR = 0.1     # 距离惩罚因子
+        self.DISTANCE_PENALTY_FACTOR = 0.5     # 距离惩罚因子
         self.TIME_PENALTY_FACTOR = 10          # 时间惩罚因子
         self.COMPLETION_REWARD = 1000          # 完成奖励
         self.INVALID_ACTION_PENALTY = -100     # 无效动作惩罚

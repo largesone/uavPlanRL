@@ -1087,7 +1087,7 @@ class ModelTrainer:
 
     def log_action_details(self, episode, step, valid_actions, chosen_action, env, reward=None, step_info=None, 
                           pre_action_completion_rate=None, post_action_completion_rate=None, 
-                          uav_resources_snapshot=None, uav_positions_snapshot=None): # [新增] 接收快照参数
+                          uav_resources_snapshot=None, uav_positions_snapshot=None, q_values=None): # [新增] 接收快照参数
         """
         记录当前步骤的详细决策信息：有哪些可选动作，最终选了哪个，包含完成率和奖励信息。
         
@@ -1164,6 +1164,11 @@ class ModelTrainer:
                 try:
                     target_idx, uav_idx, phi_idx = env.decode_action(action_idx)
                     
+                    q_value_str = "Q=N/A"
+                    if q_values is not None and action_idx < q_values.size(1):
+                        q_val = q_values[0, action_idx].item()
+                        q_value_str = f"Q={q_val:8.4f}"
+
                     target = env.targets[target_idx]
                     uav = env.uavs[uav_idx]
                     # distance = np.linalg.norm(uav.current_position - target.position)
@@ -1179,6 +1184,7 @@ class ModelTrainer:
 
                     detail_str = (
                     f"  - Action({action_idx:3d}): UAV({uav.id:2d}) -> Target({target.id:2d}), " # 使用 uav.id
+                    f"{q_value_str}, " # [修改] 添加Q值到日志行
                     f"Dist={distance:6.1f}, "
                     f"UAV_Res_Before={np.array2string(uav_res_before, formatter={'float_kind':lambda x: '%.1f' % x})}, " # 使用执行前快照数据
                     f"Tgt_Need_Before={np.array2string(target_need_before, formatter={'float_kind':lambda x: '%.1f' % x})}, " # 使用执行前快照数据
@@ -1202,13 +1208,19 @@ class ModelTrainer:
             chosen_uav = env.uavs[uav_idx]
             chosen_target = env.targets[target_idx]
 
+            # [修改] 提取并格式化选中动作的Q值
+            chosen_q_value_str = ""
+            if q_values is not None and chosen_action < q_values.size(1):
+                chosen_q_val = q_values[0, chosen_action].item()
+                chosen_q_value_str = f" | Q={chosen_q_val:8.4f}"
+
             # 使用快照数据计算预期贡献
             uav_res_before = uav_resources_snapshot.get(env.uavs[uav_idx].id, np.array([0, 0]))
             target_need_before = target_resources_snapshot.get(env.targets[target_idx].id, np.array([0, 0]))
             expected_contribution = np.minimum(uav_res_before, target_need_before)
             
             self.action_logger.info(
-                f"\n>> 最终选择: Action({chosen_action:3d}) | UAV({chosen_uav.id:2d}) -> Target({chosen_target.id:2d})")
+                f"\n>> 最终选择: Action({chosen_action:3d}) | UAV({chosen_uav.id:2d}) -> Target({chosen_target.id:2d}){chosen_q_value_str}") # [修改] 添加Q值
             self.action_logger.info(
                 f">> 执行前状态: UAV_Res={np.array2string(uav_res_before, formatter={'float_kind':lambda x: '%.1f' % x})}, "
                 f"Tgt_Need={np.array2string(target_need_before, formatter={'float_kind':lambda x: '%.1f' % x})}")

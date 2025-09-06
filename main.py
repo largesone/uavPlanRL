@@ -16,7 +16,8 @@ from typing import List
 from config import Config
 from trainer import start_training
 from evaluator import start_evaluation
-
+import logging
+from datetime import datetime
 
 def setup_console_encoding():
     """设置控制台输出编码"""
@@ -84,6 +85,7 @@ def parse_arguments():
     python main.py --mode all --scenario easy --episodes 3000 --patience 400     # 训练+推理+评估，使用easy场景
     python main.py --mode all --scenario medium --episodes 5000  --patience 400                  # 中等难度场景训练
     python main.py --mode all --use-curriculum --episodes 3000                   # 课程学习+推理+评估
+    python main.py --mode all --use-curriculum --output-dir output/cur_output
     python main.py --mode all --use-phrrt-training --use-phrrt-planning --scenario hard  # 全程使用高精度算法
     python main.py --mode all --network ZeroShotGNN --scenario small --episodes 100     # 功能测试
     python main.py --mode all --use-phrrt-planning --use-curriculum --network ZeroShotGNN --episodes 1000

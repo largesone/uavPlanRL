@@ -696,61 +696,71 @@ class ModelEvaluator:
 
     def _convert_results_to_plan(self, results, uavs, targets):
         """将推理结果转换为final_plan格式"""
-        final_plan = {uav.id: [] for uav in uavs}
+        final_plan = {uav.id: [] for uav in uavs}        
         
-        # 【重要修改】优先使用推理任务分配方案，如果存在的话
+        # 优先使用推理结束时直接记录的、最准确的任务分配方案
         if 'inference_task_assignments' in results and 'inference_target_status' in results:
-            print(f"[DEBUG] 使用推理任务分配方案构建执行计划")
+            print(f"[DEBUG] 使用推理结束时记录的最终分配方案构建执行计划")
             return self._build_plan_from_inference_results(results, uavs, targets)
         
-        # 后备方案：基于action_sequence重构任务分配
+        # 后备方案：通过模拟action_sequence来重建任务分配
+        final_plan = {uav.id: [] for uav in uavs}
         action_sequence = results.get('action_sequence', [])
-        print(f"[DEBUG] 使用action_sequence构建执行计划，动作数量: {len(action_sequence)}")
+        print(f"[DEBUG] 通过模拟action_sequence重建执行计划，动作数量: {len(action_sequence)}")
 
-        # 建立临时的UAV和目标状态，以正确模拟资源消耗
-        temp_uav_resources = {u.id: u.initial_resources.copy().astype(float) for u in uavs}
-        temp_target_needs = {t.id: t.resources.copy().astype(float) for t in targets}
-
-        for step, action_idx in enumerate(action_sequence):
+        # --- 创建环境状态的深拷贝用于模拟 ---
+        import copy
+        temp_uavs = {u.id: copy.deepcopy(u) for u in uavs}
+        temp_targets = {t.id: copy.deepcopy(t) for t in targets}
+        
+        step_counter = 0
+        for action_idx in action_sequence:
             try:
-                # (内部逻辑保持不变，但下面的 resource_cost 计算已修正)
+                # 解码动作
                 n_uavs = len(uavs)
                 n_targets = len(targets)
                 n_phi = getattr(self.config, 'GRAPH_N_PHI', 1)
                 
-                if n_uavs > 0 and n_targets > 0 and n_phi > 0:
-                    target_idx = action_idx // (n_uavs * n_phi)
-                    uav_idx = (action_idx % (n_uavs * n_phi)) // n_phi
+                if n_uavs == 0 or n_targets == 0 or n_phi == 0: continue
+                
+                target_idx = action_idx // (n_uavs * n_phi)
+                uav_idx = (action_idx % (n_uavs * n_phi)) // n_phi
+                
+                if not (target_idx < n_targets and uav_idx < n_uavs): continue
+
+                target = targets[target_idx]
+                uav = uavs[uav_idx]
+
+                # 获取模拟中的当前状态
+                sim_uav = temp_uavs[uav.id]
+                sim_target = temp_targets[target.id]
+
+                # --- [新增] 检查动作在当前模拟状态下是否有效 ---
+                actual_contribution = np.minimum(sim_uav.resources, sim_target.remaining_resources)
+                
+                if np.sum(actual_contribution) > 1e-6:
+                    # 只有当动作能产生实际贡献时，才记录到最终方案中
+                    step_counter += 1
+                    distance = np.linalg.norm(sim_uav.current_position - sim_target.position)
                     
-                    if target_idx < n_targets and uav_idx < n_uavs:
-                        target = targets[target_idx]
-                        uav = uavs[uav_idx]
-                        
-                        # 正确计算本次任务的实际资源贡献
-                        uav_available = temp_uav_resources[uav.id]
-                        target_needed = temp_target_needs[target.id]
-                        actual_contribution = np.minimum(uav_available, target_needed)
-                        
-                        # 更新临时状态以备后续任务使用
-                        temp_uav_resources[uav.id] -= actual_contribution
-                        temp_target_needs[target.id] -= actual_contribution
-                        
-                        distance = np.linalg.norm(uav.position - target.position)
-                        speed = 15.0
-                        
-                        task = {
-                            'target_id': target.id,
-                            'step': step + 1,
-                            'distance': distance,
-                            'speed': speed,
-                            'arrival_time': step * (distance / speed),
-                            'is_sync_feasible': True,
-                            # 使用正确计算的实际贡献作为 resource_cost
-                            'resource_cost': actual_contribution,
-                        }
-                        final_plan[uav.id].append(task)
+                    task = {
+                        'target_id': target.id,
+                        'step': step_counter,
+                        'distance': distance,
+                        'speed': 15.0, # 默认速度
+                        'arrival_time': step_counter * (distance / 15.0), # 简化到达时间
+                        'is_sync_feasible': True,
+                        'resource_cost': actual_contribution,
+                    }
+                    final_plan[uav.id].append(task)
+                    
+                    # --- [新增] 更新模拟状态 ---
+                    sim_uav.resources -= actual_contribution
+                    sim_target.remaining_resources -= actual_contribution
+                    sim_uav.current_position = sim_target.position # 更新UAV位置
+
             except Exception as e:
-                print(f"解析动作 {action_idx} 时出错: {e}")
+                print(f"在模拟动作序列重建方案时出错: {e}")
                 continue
         
         return final_plan

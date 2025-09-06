@@ -649,7 +649,8 @@ class GraphRLSolver:
                         pre_action_completion_rate=pre_action_completion_rate,
                         post_action_completion_rate=post_action_completion_rate,
                         uav_resources_snapshot=uav_resources_snapshot, # [新增] 传递快照
-                        uav_positions_snapshot=uav_positions_snapshot
+                        uav_positions_snapshot=uav_positions_snapshot,
+                        q_values=q_values  # [新增] 将Q值张量传递给日志函数
                     ) 
                 # 动作监控和计数逻辑（带错误处理）
                 try:
