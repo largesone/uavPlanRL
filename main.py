@@ -69,6 +69,7 @@ def parse_arguments():
     
   推理模式:
     python main.py --mode inference --models output/models/300.pth --scenario balanced   # 单模型推理，指定推理场景
+    python main.py --mode inference --models output/300.pth --scenario balanced
     python main.py --mode inference --models model1.pth model2.pth --scenario balanced  # 集成推理
     python main.py --mode inference --use-phrrt-planning --scenario hard # 推理时使用高精度PH-RRT算法
     

@@ -52,6 +52,10 @@ def evaluate_plan(final_plan, uavs, targets, deadlocked_tasks=None, final_uav_st
     target_contributions = defaultdict(lambda: np.zeros_like(total_demand, dtype=float))
     all_tasks = [task for tasks in final_plan.values() for task in tasks]
     for task in all_tasks:
+        # 添加调试信息
+        if not isinstance(task, dict):
+            print(f"[DEBUG] 警告: task不是字典类型，而是{type(task)}: {task}")
+            continue
         target_id = task['target_id']
         target = next((t for t in targets if t.id == target_id), None)
         if target:

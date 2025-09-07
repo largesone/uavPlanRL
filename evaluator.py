@@ -82,18 +82,23 @@ class PlanVisualizer:
                 uav_id = step['uav_id']
                 task = step['task_ref']
 
-                uav_available_resources = temp_uav_resources[uav_id]
-                actual_contribution = np.minimum(target_remaining_need_before, uav_available_resources)
+                # 【修复】优先使用final_plan中已经正确的resource_cost数据
+                if 'resource_cost' in task and task['resource_cost'] is not None:
+                    actual_contribution = task['resource_cost']
+                    collaboration_log += f"     - UAV {uav_id} 贡献 {actual_contribution} (来自推理结果)\n"
+                else:
+                    # 备用方案：重新计算
+                    uav_available_resources = temp_uav_resources[uav_id]
+                    actual_contribution = np.minimum(target_remaining_need_before, uav_available_resources)
+                    task['resource_cost'] = actual_contribution
+                    collaboration_log += f"     - UAV {uav_id} 贡献 {actual_contribution} (重新计算)\n"
                 
                 if np.all(actual_contribution < 1e-6):
-                    task['resource_cost'] = np.zeros_like(uav_available_resources)
                     collaboration_log += f"     - UAV {uav_id} 尝试贡献，但目标需求已满足。贡献: [0. 0.]\n"
                     continue
 
                 temp_uav_resources[uav_id] -= actual_contribution
                 target_remaining_need_before -= actual_contribution
-                task['resource_cost'] = actual_contribution
-                collaboration_log += f"     - UAV {uav_id} 贡献 {actual_contribution}, 剩余资源 {temp_uav_resources[uav_id]}\n"
                 
             temp_target_resources[target_id] = target_remaining_need_before
             collaboration_log += f"   - 事件结束，目标剩余需求: {target_remaining_need_before}\n\n"
@@ -125,11 +130,18 @@ class PlanVisualizer:
             resource_types = len(targets[0].resources) if targets else 2
             total_demand_all = np.sum([t.resources for t in targets], axis=0)
 
-            all_resource_costs = [d['resource_cost'] for details in target_collaborators_details.values() for d in details]
-            if not all_resource_costs:
-                total_contribution_all_for_summary = np.zeros(resource_types)
+            # 【修复】优先使用推理结果中的总贡献数据，确保数据一致性
+            if hasattr(self, '_inference_total_contribution') and self._inference_total_contribution is not None:
+                total_contribution_all_for_summary = self._inference_total_contribution
+                print(f"[DEBUG] 使用推理结果中的总贡献: {total_contribution_all_for_summary}")
             else:
-                total_contribution_all_for_summary = np.sum(all_resource_costs, axis=0)
+                # 备用方案：从final_plan计算
+                all_resource_costs = [d['resource_cost'] for details in target_collaborators_details.values() for d in details]
+                if not all_resource_costs:
+                    total_contribution_all_for_summary = np.zeros(resource_types)
+                else:
+                    total_contribution_all_for_summary = np.sum(all_resource_costs, axis=0)
+                    print(f"[DEBUG] 从final_plan计算总贡献: {total_contribution_all_for_summary}")
 
             for t in targets:
                 current_target_contribution_sum = np.sum([d['resource_cost'] for d in target_collaborators_details.get(t.id, [])], axis=0)
@@ -151,7 +163,7 @@ class PlanVisualizer:
                           f"- 总需求/总贡献: {np.array2string(total_demand_all, formatter={'float_kind':lambda x: '%.0f' % x})} / {np.array2string(total_contribution_all_for_summary, formatter={'float_kind':lambda x: '%.1f' % x})}\n"
                           f"- 总供给/资源富裕度: {np.array2string(total_supply_all, formatter={'float_kind':lambda x: '%.0f' % x})} / {np.array2string(resource_abundance_rate, formatter={'float_kind':lambda x: '%.1f%%' % x})}\n"
                           f"- 已满足目标: {satisfied_targets_count} / {num_targets} ({satisfaction_rate_percent:.1f}%)\n"
-                          f"- 满足率: {overall_completion_rate_percent:.1f}% (显示用，文件名使用标准评估指标)")
+                          f"- 满足率: {overall_completion_rate_percent  :.1f}% (目标资源需求满足情况)")
 
         # 绘制无人机起点
         ax.scatter([u.position[0] for u in uavs], [u.position[1] for u in uavs], 
@@ -589,8 +601,8 @@ class ModelEvaluator:
                                     uavs, targets, obstacles, results, suffix: str = ""):
         """生成完整的可视化结果 - 集成PlanVisualizer和ResultSaver"""
         try:
-            # 构建final_plan格式（从推理结果转换）
-            final_plan = self._convert_results_to_plan(results, uavs, targets)
+            # 使用已经构建好的final_plan，避免重复构建
+            final_plan = results.get('final_plan', {})
             
             # 创建可视化器和保存器
             visualizer = PlanVisualizer(self.config)
@@ -631,7 +643,93 @@ class ModelEvaluator:
             
         except Exception as e:
             print(f"生成完整可视化时出错: {e}")
+    def _build_execution_plan_from_action_sequence(self, action_sequence: List[int], uavs: List[UAV], targets: List[Target], env: UAVTaskEnv, step_details: List[dict] = None) -> dict:
+        """
+        函数级注释: 严格根据动作序列(action_sequence)构建最终执行计划。
+        这个方法能真实反映智能体在推理过程中的决策顺序。
+        
+        Args:
+            action_sequence: 动作序列
+            uavs: UAV列表
+            targets: 目标列表
+            env: 环境对象
+            step_details: 步骤详细信息（可选，如果提供则使用，否则从action_sequence重建）
+        """
+        uav_assignments = {uav.id: [] for uav in uavs}
+        temp_uav_positions = {u.id: u.position.copy().astype(float) for u in uavs}
+        
+        # 如果提供了step_details，直接使用；否则从action_sequence重建
+        if step_details:
+            print(f"[DEBUG] 使用提供的step_details构建执行计划，步骤数: {len(step_details)}")
+            for step, details in enumerate(step_details):
+                uav_id = details['uav_id']
+                target_id = details['target_id']
+                # 从原始列表中找到UAV和Target对象
+                uav = next((u for u in uavs if u.id == uav_id), None)
+                target = next((t for t in targets if t.id == target_id), None)
 
+                if not uav or not target:
+                    continue
+
+                # 计算飞行距离和到达时间
+                distance = np.linalg.norm(temp_uav_positions[uav_id] - target.position)
+                arrival_time = distance / uav.economic_speed if uav.economic_speed > 0 else float('inf')
+
+                task_detail = {
+                    'target_id': target_id,
+                    'step': step + 1,
+                    'distance': distance,
+                    'arrival_time': arrival_time,
+                    'resource_cost': details['contribution'], # 直接使用捕获的真实贡献
+                    'phi_idx': details['phi_idx'],
+                    'is_sync_feasible': True # 推理中默认为真
+                }
+                uav_assignments[uav_id].append(task_detail)
+                print(f"[DEBUG] 添加任务到UAV {uav_id}: {task_detail}")
+
+                # 更新UAV的当前位置，用于计算下一段航程的距离
+                temp_uav_positions[uav_id] = target.position.copy()
+        else:
+            print(f"[DEBUG] 从action_sequence重建执行计划，动作数: {len(action_sequence)}")
+            # 从action_sequence重建（备用方案）
+            for step, action_idx in enumerate(action_sequence):
+                try:
+                    # 解码动作
+                    target_idx, uav_idx, phi_idx = env.decode_action(action_idx)
+                    
+                    if uav_idx < len(uavs) and target_idx < len(targets):
+                        uav = uavs[uav_idx]
+                        target = targets[target_idx]
+                        
+                        # 计算飞行距离和到达时间
+                        distance = np.linalg.norm(temp_uav_positions[uav.id] - target.position)
+                        arrival_time = distance / uav.economic_speed if uav.economic_speed > 0 else float('inf')
+
+                        # 模拟资源贡献（这里只能估算，因为没有真实的贡献数据）
+                        contribution = np.minimum(uav.resources, target.resources)
+
+                        task_detail = {
+                            'target_id': target.id,
+                            'step': step + 1,
+                            'distance': distance,
+                            'arrival_time': arrival_time,
+                            'resource_cost': contribution,
+                            'phi_idx': phi_idx,
+                            'is_sync_feasible': True
+                        }
+                        uav_assignments[uav.id].append(task_detail)
+                        print(f"[DEBUG] 添加任务到UAV {uav.id}: {task_detail}")
+
+                        # 更新UAV的当前位置
+                        temp_uav_positions[uav.id] = target.position.copy()
+
+                except Exception as e:
+                    print(f"在重建动作序列时出错: {e}")
+                    continue
+
+        return {
+            'uav_assignments': uav_assignments
+        }
     def _build_plan_from_inference_results(self, results, uavs, targets):
         """
         从推理结果构建执行计划
@@ -679,7 +777,7 @@ class ModelEvaluator:
                             speed = 15.0  # 默认速度
                             
                             task = {
-                                'target_id': target_id,
+                                'target_id': int(target_id),  # 确保target_id是整数类型
                                 'step': len(uav_tasks) + 1,
                                 'distance': distance,
                                 'speed': speed,
@@ -694,76 +792,7 @@ class ModelEvaluator:
         
         return final_plan
 
-    def _convert_results_to_plan(self, results, uavs, targets):
-        """将推理结果转换为final_plan格式"""
-        final_plan = {uav.id: [] for uav in uavs}        
-        
-        # 优先使用推理结束时直接记录的、最准确的任务分配方案
-        if 'inference_task_assignments' in results and 'inference_target_status' in results:
-            print(f"[DEBUG] 使用推理结束时记录的最终分配方案构建执行计划")
-            return self._build_plan_from_inference_results(results, uavs, targets)
-        
-        # 后备方案：通过模拟action_sequence来重建任务分配
-        final_plan = {uav.id: [] for uav in uavs}
-        action_sequence = results.get('action_sequence', [])
-        print(f"[DEBUG] 通过模拟action_sequence重建执行计划，动作数量: {len(action_sequence)}")
 
-        # --- 创建环境状态的深拷贝用于模拟 ---
-        import copy
-        temp_uavs = {u.id: copy.deepcopy(u) for u in uavs}
-        temp_targets = {t.id: copy.deepcopy(t) for t in targets}
-        
-        step_counter = 0
-        for action_idx in action_sequence:
-            try:
-                # 解码动作
-                n_uavs = len(uavs)
-                n_targets = len(targets)
-                n_phi = getattr(self.config, 'GRAPH_N_PHI', 1)
-                
-                if n_uavs == 0 or n_targets == 0 or n_phi == 0: continue
-                
-                target_idx = action_idx // (n_uavs * n_phi)
-                uav_idx = (action_idx % (n_uavs * n_phi)) // n_phi
-                
-                if not (target_idx < n_targets and uav_idx < n_uavs): continue
-
-                target = targets[target_idx]
-                uav = uavs[uav_idx]
-
-                # 获取模拟中的当前状态
-                sim_uav = temp_uavs[uav.id]
-                sim_target = temp_targets[target.id]
-
-                # --- [新增] 检查动作在当前模拟状态下是否有效 ---
-                actual_contribution = np.minimum(sim_uav.resources, sim_target.remaining_resources)
-                
-                if np.sum(actual_contribution) > 1e-6:
-                    # 只有当动作能产生实际贡献时，才记录到最终方案中
-                    step_counter += 1
-                    distance = np.linalg.norm(sim_uav.current_position - sim_target.position)
-                    
-                    task = {
-                        'target_id': target.id,
-                        'step': step_counter,
-                        'distance': distance,
-                        'speed': 15.0, # 默认速度
-                        'arrival_time': step_counter * (distance / 15.0), # 简化到达时间
-                        'is_sync_feasible': True,
-                        'resource_cost': actual_contribution,
-                    }
-                    final_plan[uav.id].append(task)
-                    
-                    # --- [新增] 更新模拟状态 ---
-                    sim_uav.resources -= actual_contribution
-                    sim_target.remaining_resources -= actual_contribution
-                    sim_uav.current_position = sim_target.position # 更新UAV位置
-
-            except Exception as e:
-                print(f"在模拟动作序列重建方案时出错: {e}")
-                continue
-        
-        return final_plan
 
     def start_evaluation(self, model_paths: Union[str, List[str]], scenario_name: str = "small"):
         """
@@ -816,21 +845,34 @@ class ModelEvaluator:
         
         # --- 单一数据源处理流程 ---
         if results:
-            # 1. 重建带有正确资源消耗的规划方案
-            final_plan = self._convert_results_to_plan(results, uavs, targets)
-            
+            # 1. 重建带有正确资源消耗的规划方案            
+            action_sequence = results.get('action_sequence', [])
+            step_details = results.get('step_details', [])
+            plan_data = self._build_execution_plan_from_action_sequence(action_sequence, uavs, targets, self.env, step_details)
+            final_plan = plan_data.get('uav_assignments', {})
+
             # 2. 调用权威评估函数，生成唯一的评估指标
             evaluation_metrics = evaluate_plan(
                 final_plan, uavs, targets, final_uav_states=results.get('final_uav_states')
             )
             
-            # 3. 将权威评估结果合并到results中，作为唯一数据源
+            # 3. 将final_plan存储到results中，避免重复构建
+            results['final_plan'] = final_plan
+            
+            # 4. 优先使用推理结果中的完成率，确保数据一致性
+            if 'completion_rate' in results:
+                print(f"[DEBUG] 使用推理结果中的完成率: {results['completion_rate']:.4f}")
+                evaluation_metrics['completion_rate'] = results['completion_rate']
+            else:
+                print(f"[DEBUG] 使用evaluate_plan计算的完成率: {evaluation_metrics.get('completion_rate', 0):.4f}")
+            
+            # 5. 将权威评估结果合并到results中，作为唯一数据源
             results.update(evaluation_metrics)
 
-            # 4. 处理评估结果（用于控制台输出）
+            # 6. 处理评估结果（用于控制台输出）
             self._process_evaluation_results(results)
 
-            # 5. 生成完整的可视化结果（用于报告和图片）
+            # 7. 生成完整的可视化结果（用于报告和图片）
             self._generate_complete_visualization(scenario_name, inference_mode, uavs, targets, obstacles, results, suffix)
 
         print(f"\n评估完成! 总耗时: {self.evaluation_stats['evaluation_time']:.2f}秒")
@@ -991,10 +1033,10 @@ class ModelEvaluator:
             return None
         
         # 创建环境
-        env = UAVTaskEnv(uavs, targets, graph, obstacles, self.config, obs_mode=obs_mode)
+        self.env = UAVTaskEnv(uavs, targets, graph, obstacles, self.config, obs_mode=obs_mode)
         
         # 执行推理，传递scenario_name参数
-        results = self._run_inference(network, env, use_softmax_sampling=True, scenario_name=scenario_name)
+        results = self._run_inference(network, self.env, use_softmax_sampling=True, scenario_name=scenario_name)
         
         return results
     
@@ -1151,8 +1193,9 @@ class ModelEvaluator:
         total_reward = 0.0
         step_count = 0
         max_steps = 100
-        action_sequence = []
-        
+        action_sequence = []        
+        step_details = [] # 新增：用于存储每一步的详细执行“事实”
+
         with torch.no_grad():
             while step_count < max_steps:
                 # 准备状态张量
@@ -1257,12 +1300,22 @@ class ModelEvaluator:
                     # 跳过无效或无贡献的动作
                     print(f"⚠️ 跳过无效动作: UAV{uav.id} -> Target{target.id} (无资源贡献)")
                     continue
-                
+                uav_res_before = uav.resources.copy()
+
                 # 执行动作
                 next_state, reward, done, truncated, info = env.step(action)
                 # 从info中提取reward_breakdown
                 reward_breakdown = info.get('reward_breakdown', {})
+                actual_contribution = uav_res_before - uav.resources
 
+                # 记录这一步的详细“事实”
+                step_details.append({
+                    'action_idx': action,
+                    'uav_id': uav.id,
+                    'target_id': target.id,
+                    'contribution': actual_contribution,
+                    'phi_idx': phi_idx
+                })
                 # 添加调试信息
                 if self.config.ENABLE_DEBUG:
                     print(f"[DEBUG] 步骤 {step_count + 1}: UAV{uav.id} -> Target{target.id}, 动作={action}, 奖励={reward:.2f}")
@@ -1306,16 +1359,20 @@ class ModelEvaluator:
         # 【重要修复】以推理结果为准，记录推理结束时的任务分配方案
         # 推理过程已经完成了任务分配决策，实际执行只是进行路径规划等后续工作
         
-        # 计算推理结束时的完成率（基于推理结果）
+        # 计算推理结束时的完成率（基于UAV资源消耗，与evaluate.py保持一致）
         total_demand = np.sum([t.resources for t in env.targets], axis=0)
-        total_contribution = np.zeros_like(total_demand, dtype=np.float64)
-        for target in env.targets:
-            target_contribution = target.resources - target.remaining_resources
-            total_contribution += target_contribution.astype(np.float64)
+        
+        # 使用UAV的初始资源和最终资源计算总贡献（与evaluate.py中的逻辑一致）
+        total_initial = np.sum([uav.initial_resources for uav in env.uavs], axis=0)
+        total_final = np.sum([uav.resources for uav in env.uavs], axis=0)
+        total_contribution = total_initial - total_final
         
         total_demand_sum = np.sum(total_demand)
-        total_contribution_sum = np.sum(total_contribution)
+        total_contribution_sum = np.sum(np.minimum(total_contribution, total_demand))
         completion_rate = total_contribution_sum / total_demand_sum if total_demand_sum > 0 else 1.0
+        
+        # 【修复】保存推理结果中的总贡献数据，供报告生成使用
+        self._inference_total_contribution = total_contribution
         
         # 【调试】显示推理结束时的任务分配结果
         print(f"[DEBUG] 推理任务分配结果:")
@@ -1374,6 +1431,7 @@ class ModelEvaluator:
             'completion_rate': completion_rate,  # 基于推理结果计算的完成率
             'step_count': step_count,
             'action_sequence': action_sequence,
+            'step_details': step_details, # 新增：传递详细的执行步骤
             'final_state': state,
             'final_uav_states': final_uav_states,
             'inference_task_assignments': inference_task_assignments,  # 推理任务分配方案
