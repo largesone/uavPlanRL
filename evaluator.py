@@ -1167,6 +1167,21 @@ class ModelEvaluator:
         # 执行集成推理，传递scenario_name参数
         results = self._run_ensemble_inference(networks, env, scenario_name)
         
+        # 【修复】为集成推理结果构建final_plan，确保数据一致性
+        if results:
+            # 1. 重建带有正确资源消耗的规划方案            
+            action_sequence = results.get('action_sequence', [])
+            step_details = results.get('step_details', [])
+            plan_data = self._build_execution_plan_from_action_sequence(action_sequence, uavs, targets, env, step_details)
+            final_plan = plan_data.get('uav_assignments', {})
+
+            # 2. 将final_plan存储到results中，供可视化使用
+            results['final_plan'] = final_plan
+            
+            # 3. 优先使用推理结果中的完成率，确保数据一致性
+            if 'completion_rate' in results:
+                print(f"[DEBUG] 使用集成推理结果中的完成率: {results['completion_rate']:.4f}")
+        
         return results
     
     def _run_inference(self, network, env, use_softmax_sampling=True, scenario_name='easy'):
@@ -1462,6 +1477,7 @@ class ModelEvaluator:
         step_count = 0
         max_steps = 100
         action_sequence = []
+        step_details = [] # 新增：用于存储每一步的详细执行"事实"
         
         with torch.no_grad():
             while step_count < max_steps:
@@ -1560,8 +1576,21 @@ class ModelEvaluator:
                     print(f"⚠️ 跳过无效动作: UAV{uav.id} -> Target{target.id} (无资源贡献)")
                     continue
                 
+                # 记录执行前的UAV资源状态
+                uav_res_before = uav.resources.copy()
+                
                 # 执行动作
                 next_state, reward, done, truncated, info = env.step(action)
+                
+                # 记录这一步的详细"事实"
+                actual_contribution = uav_res_before - uav.resources
+                step_details.append({
+                    'action_idx': action,
+                    'uav_id': uav.id,
+                    'target_id': target.id,
+                    'contribution': actual_contribution,
+                    'phi_idx': phi_idx
+                })
                 
                 # 添加调试信息
                 if self.config.ENABLE_DEBUG:
@@ -1575,21 +1604,20 @@ class ModelEvaluator:
                 if done or truncated:
                     break
         
-        # 计算完成率 - 修复：使用标准评估指标的计算方式
-        # 基于资源贡献与需求的比率，而不是简单的目标数量比率
+        # 计算集成推理结束时的完成率（基于UAV资源消耗，与单模型推理保持一致）
         total_demand = np.sum([t.resources for t in env.targets], axis=0)
-        total_demand_safe = np.maximum(total_demand, 1e-6)
         
-        # 计算实际资源贡献 - 修复：确保使用float类型避免数据类型不匹配
-        total_contribution = np.zeros_like(total_demand, dtype=np.float64)
-        for target in env.targets:
-            target_contribution = target.resources - target.remaining_resources
-            total_contribution += target_contribution.astype(np.float64)
+        # 使用UAV的初始资源和最终资源计算总贡献（与单模型推理中的逻辑一致）
+        total_initial = np.sum([uav.initial_resources for uav in env.uavs], axis=0)
+        total_final = np.sum([uav.resources for uav in env.uavs], axis=0)
+        total_contribution = total_initial - total_final
         
-            # 【修改】使用“总贡献/总需求”的标准方法计算完成率
-            total_demand_sum = np.sum(total_demand)
-            total_contribution_sum = np.sum(np.minimum(total_contribution, total_demand))
-            completion_rate = total_contribution_sum / total_demand_sum if total_demand_sum > 0 else 1.0
+        total_demand_sum = np.sum(total_demand)
+        total_contribution_sum = np.sum(np.minimum(total_contribution, total_demand))
+        completion_rate = total_contribution_sum / total_demand_sum if total_demand_sum > 0 else 1.0
+        
+        # 【修复】保存集成推理结果中的总贡献数据，供报告生成使用
+        self._inference_total_contribution = total_contribution
        
         # 添加调试信息：显示动作序列
         if self.config.ENABLE_DEBUG:
@@ -1610,6 +1638,7 @@ class ModelEvaluator:
             'completion_rate': completion_rate,
             'step_count': step_count,
             'action_sequence': action_sequence,
+            'step_details': step_details, # 新增：传递详细的执行步骤
             'final_state': state,
             'ensemble_size': len(networks),
             'final_uav_states': final_uav_states

@@ -10,8 +10,8 @@ from typing import List, Dict, Any, Optional, Union
 from datetime import datetime
 
 from config import Config
-from scenarios import generate_scenario_by_name, generate_random_scenario
-from evaluator import Evaluator
+from scenarios import get_balanced_scenario, get_small_scenario, get_complex_scenario
+from evaluator import ModelEvaluator
 from trainer import GraphRLSolver
 from environment import DirectedGraph, UAVTaskEnv
 from entities import UAV, Target
@@ -27,7 +27,7 @@ class EnsembleInferenceManager:
             config: 配置对象
         """
         self.config = config
-        self.evaluator = Evaluator(config)
+        self.evaluator = ModelEvaluator(config)
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         
     def run_ensemble_inference(self, 
@@ -150,7 +150,16 @@ class EnsembleInferenceManager:
             else:
                 # 使用预定义场景
                 try:
-                    uavs, targets, obstacles = generate_scenario_by_name(scenario)
+                    if scenario == 'balanced':
+                        uavs, targets, obstacles = get_balanced_scenario(50.0)
+                    elif scenario == 'small':
+                        uavs, targets, obstacles = get_small_scenario(50.0)
+                    elif scenario == 'complex':
+                        uavs, targets, obstacles = get_complex_scenario(50.0)
+                    else:
+                        print(f"⚠️ 未知场景: {scenario}")
+                        continue
+                    
                     scenario_list.append({
                         'name': scenario,
                         'data': (uavs, targets, obstacles)
