@@ -9,12 +9,12 @@
 # 1. 增量测试模式 (默认):
 #    逐步增加无人机和目标的数量，测试模型在不同规模下的性能。
 #    命令:
-#    python advanced_test_suite.py --models ./output/models/best_model_ZeroShotGNN_CL_FA_Level_30_ep000600_reward10212.2_comp1.000_20250905_044922.pth --test-mode incremental
+#    python advanced_test_suite.py --models ./output/300.pth --test-mode incremental
 #
 # 2. 随机测试模式:
 #    生成指定数量的完全随机场景（无人机和目标数量在配置范围内随机），测试模型的泛化能力。
 #    命令:
-#    python advanced_test_suite.py --models ./output/models/best_model_ZeroShotGNN_CL_FA_Level_30_ep000600_reward10212.2_comp1.000_20250905_044922.pth --test-mode random --num-random-scenarios 10
+#    python advanced_test_suite.py --models ./output/300.pth --test-mode random --num-random-scenarios 10
 #
 # 3. 多模型对比:
 #    在任意模式下，提供多个模型路径，脚本会在完全相同的场景下对它们进行测试。
@@ -240,8 +240,27 @@ class ModelTestSuiteRunner:
 
     def _process_scenario(self, uavs: list, targets: list, obstacles: list, scenario_name: str):
         """对单个生成好的场景，使用所有已加载的模型进行测试和保存"""
-        # 遍历所有已加载的模型
-        for model_path, network in self.networks.items():
+        # 判断是否使用集成推理（当有多个模型时）
+        if len(self.networks) > 1:
+            print(f"\n--- 执行集成推理 | 模型数量: {len(self.networks)} | 场景: {scenario_name} ---")
+            
+            # 执行集成推理
+            start_time = time.time()
+            results = self.evaluator._ensemble_inference(self.model_paths, uavs, targets, obstacles, scenario_name=scenario_name)
+            inference_time = time.time() - start_time
+            
+            if not results:
+                print("集成推理失败，跳过此场景测试。")
+                return
+                
+            # 使用第一个模型的名称作为集成推理的标识
+            model_name = "ensemble_" + "_".join([os.path.basename(path)[:10] for path in self.model_paths[:3]])
+            if len(self.model_paths) > 3:
+                model_name += f"_and_{len(self.model_paths)-3}_more"
+        else:
+            # 单模型推理逻辑保持不变
+            model_path = list(self.networks.keys())[0]
+            network = self.networks[model_path]
             model_name = os.path.basename(model_path)
             print(f"\n--- 测试模型: {model_name} | 场景: {scenario_name} ---")
 
@@ -256,10 +275,10 @@ class ModelTestSuiteRunner:
             
             if not results:
                 print("推理失败，跳过此模型的本次测试。")
-                continue
+                return
 
             # 评估和保存结果
-            final_plan = self.evaluator._convert_results_to_plan(results, uavs, targets)
+            final_plan = self.evaluator._build_plan_from_inference_results(results, uavs, targets)
             metrics = evaluate_plan(final_plan, uavs, targets, final_uav_states=results.get('final_uav_states'))
             
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -291,7 +310,8 @@ class ModelTestSuiteRunner:
             
             # 将结果追加到CSV文件
             csv_row = {
-                'timestamp': timestamp, 'model_name': model_name, 'inference_mode': 'single_model_test',
+                'timestamp': timestamp, 'model_name': model_name, 
+                'inference_mode': 'ensemble_inference' if len(self.networks) > 1 else 'single_model_test',
                 'scenario_name': scenario_name, 'num_uavs': len(uavs), 'num_targets': len(targets),
                 'num_obstacles': len(obstacles), 'resource_abundance': 1.2,
                 'inference_time_s': round(inference_time, 2),
@@ -304,7 +324,10 @@ class ModelTestSuiteRunner:
                 writer = csv.DictWriter(f, fieldnames=self.csv_fieldnames)
                 writer.writerow(csv_row)
 
-            print(f"模型 {model_name} 在场景 {scenario_name} 的测试完成。")
+            if len(self.networks) > 1:
+                print(f"集成推理 ({len(self.networks)}个模型) 在场景 {scenario_name} 的测试完成。")
+            else:
+                print(f"模型 {model_name} 在场景 {scenario_name} 的测试完成。")
 
     def run_suite(self, test_mode, num_random_scenarios, uav_range, target_range, step):
         """根据选择的模式，运行相应的测试套件"""

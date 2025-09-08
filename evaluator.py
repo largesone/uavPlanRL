@@ -1619,6 +1619,44 @@ class ModelEvaluator:
         # 【修复】保存集成推理结果中的总贡献数据，供报告生成使用
         self._inference_total_contribution = total_contribution
        
+        # 【调试】显示集成推理结束时的任务分配结果
+        print(f"[DEBUG] 集成推理任务分配结果:")
+        print(f"  - 总需求: {total_demand} (总和: {total_demand_sum})")
+        print(f"  - 集成推理分配总贡献: {total_contribution} (总和: {total_contribution_sum})")
+        print(f"  - 集成推理完成率: {completion_rate:.4f}")
+        
+        # 计算目标完成率（完全满足的目标数量比例）
+        satisfied_targets = sum(1 for t in env.targets if np.all(t.remaining_resources <= 1e-6))
+        total_targets = len(env.targets)
+        target_completion_rate = satisfied_targets / total_targets if total_targets > 0 else 1.0
+        print(f"  - 集成推理时完全满足目标数: {satisfied_targets}/{total_targets}")
+        print(f"  - 集成推理时目标完成率: {target_completion_rate:.4f}")
+        
+        # 显示每个目标的详细状态
+        for i, target in enumerate(env.targets):
+            remaining = target.remaining_resources
+            is_satisfied = np.all(remaining <= 1e-6)
+            print(f"  - 目标{i+1}: 剩余需求{remaining}, 完全满足: {is_satisfied}")
+        
+        # 记录推理结束时的任务分配方案
+        inference_task_assignments = {}
+        for uav in env.uavs:
+            inference_task_assignments[uav.id] = {
+                'initial_resources': uav.initial_resources.copy(),
+                'final_resources': uav.resources.copy(),
+                'consumed_resources': uav.initial_resources - uav.resources
+            }
+        
+        inference_target_status = {}
+        for target in env.targets:
+            inference_target_status[target.id] = {
+                'required_resources': target.resources.copy(),
+                'remaining_resources': target.remaining_resources.copy(),
+                'contributed_resources': target.resources - target.remaining_resources
+            }
+        
+        print(f"[DEBUG] 集成推理任务分配方案已记录，包含{len(inference_task_assignments)}个UAV和{len(inference_target_status)}个目标")
+        
         # 添加调试信息：显示动作序列
         if self.config.ENABLE_DEBUG:
             print(f"\n[DEBUG] 集成推理完成，动作序列: {action_sequence}")
@@ -1641,7 +1679,9 @@ class ModelEvaluator:
             'step_details': step_details, # 新增：传递详细的执行步骤
             'final_state': state,
             'ensemble_size': len(networks),
-            'final_uav_states': final_uav_states
+            'final_uav_states': final_uav_states,
+            'inference_task_assignments': inference_task_assignments,  # 集成推理任务分配方案
+            'inference_target_status': inference_target_status  # 集成推理目标状态
         }
     
     def _process_evaluation_results(self, results):
