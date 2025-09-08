@@ -269,38 +269,46 @@ class PlanVisualizer:
         uav_color_map = {u.id: colors[i] for i, u in enumerate(uavs)}
         
         # 绘制路径，确保所有UAV的任务都正确显示
-        print(f"[DEBUG] 开始绘制所有UAV路径，total UAVs: {len(final_plan)}")
+        if getattr(self.config, 'ENABLE_DEBUG', False):
+            print(f"[DEBUG] 开始绘制所有UAV路径，total UAVs: {len(final_plan)}")
         
         for uav_id, tasks in final_plan.items():
-            print(f"[DEBUG] === 处理UAV {uav_id} ===")
+            if getattr(self.config, 'ENABLE_DEBUG', False):
+                print(f"[DEBUG] === 处理UAV {uav_id} ===")
             uav_color = uav_color_map.get(uav_id, 'gray')
             temp_resources = next(u for u in uavs if u.id == uav_id).initial_resources.copy().astype(float)
             
             # 获取无人机起始位置
             uav = next(u for u in uavs if u.id == uav_id)
             current_pos = uav.position
-            print(f"[DEBUG] UAV {uav_id} 起始位置: {current_pos}")
+            if getattr(self.config, 'ENABLE_DEBUG', False):
+                print(f"[DEBUG] UAV {uav_id} 起始位置: {current_pos}")
             
             # 按步骤顺序排序任务
             sorted_tasks = sorted(tasks, key=lambda x: x.get('step', 0))
-            print(f"[DEBUG] UAV {uav_id} 任务数量: {len(sorted_tasks)}")
+            if getattr(self.config, 'ENABLE_DEBUG', False):
+                print(f"[DEBUG] UAV {uav_id} 任务数量: {len(sorted_tasks)}")
             
             # 绘制连续路径
             for i, task in enumerate(sorted_tasks):
-                print(f"[DEBUG] UAV {uav_id} 任务 {i+1}/{len(sorted_tasks)}: step{task.get('step', '?')}")
+                if getattr(self.config, 'ENABLE_DEBUG', False):
+                    print(f"[DEBUG] UAV {uav_id} 任务 {i+1}/{len(sorted_tasks)}: step{task.get('step', '?')}")
                 
                 # 获取目标位置
                 target_id = task['target_id']
                 target = next(t for t in targets if t.id == target_id)
                 target_pos = target.position
-                
-                print(f"[DEBUG] UAV {uav_id} -> 目标{target_id}: {current_pos} -> {target_pos}")
+
+                if getattr(self.config, 'ENABLE_DEBUG', False):
+                    print(f"[DEBUG] UAV {uav_id} -> 目标{target_id}: {current_pos} -> {target_pos}")
                 
                 # 检查路径距离
                 distance_check = np.linalg.norm(np.array(target_pos) - np.array(current_pos))
-                print(f"[DEBUG] UAV {uav_id} 路径距离: {distance_check:.2f}m")
+                if getattr(self.config, 'ENABLE_DEBUG', False):
+                    print(f"[DEBUG] UAV {uav_id} 路径距离: {distance_check:.2f}m")
                 if distance_check < 1.0:
-                    print(f"[WARNING] UAV {uav_id} 起点终点过近: {distance_check:.2f}m")
+                    if getattr(self.config, 'ENABLE_DEBUG', False):
+                        print(f"[WARNING] UAV {uav_id} 起点终点过近: {distance_check:.2f}m")
                 
                 planning_successful = True # 新增：初始化路径规划成功标志
                 # 使用PH-RRT算法生成曲线路径
@@ -324,20 +332,24 @@ class PlanVisualizer:
                         path_points, distance = result
                         path_points = np.array(path_points)
                         if len(path_points) <= 1:
-                            print(f"[WARNING] UAV {uav_id} 到目标{target_id} PH-RRT路径点数不足({len(path_points)})，使用平滑曲线")
+                            if getattr(self.config, 'ENABLE_DEBUG', False):
+                                print(f"[WARNING] UAV {uav_id} 到目标{target_id} PH-RRT路径点数不足({len(path_points)})，使用平滑曲线")
                             path_points = self._generate_smooth_curve(current_pos, target_pos)
                             planning_successful = False
                         else:
-                            print(f"[DEBUG] UAV {uav_id} 到目标{target_id} PH-RRT成功，路径点数: {len(path_points)}")
+                            if getattr(self.config, 'ENABLE_DEBUG', False):
+                                print(f"[DEBUG] UAV {uav_id} 到目标{target_id} PH-RRT成功，路径点数: {len(path_points)}")
                             # 检查路径是否实际移动
                             start_point = path_points[0]
                             end_point = path_points[-1]
                             actual_distance = np.linalg.norm(end_point - start_point)
                             expected_distance = np.linalg.norm(np.array(target_pos) - np.array(current_pos))
-                            print(f"[DEBUG] UAV {uav_id} 路径检查: 实际距离={actual_distance:.2f}m, 期望距离={expected_distance:.2f}m")
+                            if getattr(self.config, 'ENABLE_DEBUG', False):
+                                print(f"[DEBUG] UAV {uav_id} 路径检查: 实际距离={actual_distance:.2f}m, 期望距离={expected_distance:.2f}m")
                             
                             if actual_distance < expected_distance * 0.5:  # 如果实际路径距离小于期望距离的50%
-                                print(f"[WARNING] UAV {uav_id} PH-RRT路径异常(距离不足)，使用平滑曲线")
+                                if getattr(self.config, 'ENABLE_DEBUG', False):
+                                    print(f"[WARNING] UAV {uav_id} PH-RRT路径异常(距离不足)，使用平滑曲线")
                                 path_points = self._generate_smooth_curve(current_pos, target_pos)
                                 planning_successful = False
                     else:
@@ -346,21 +358,23 @@ class PlanVisualizer:
                         planning_successful = False # 新增：更新标志位
                         
                 except Exception as e:
-                    print(f"[WARNING] UAV {uav_id} PH-RRT规划异常: {e}，使用平滑曲线")
+                    if getattr(self.config, 'ENABLE_DEBUG', False):
+                        print(f"[WARNING] UAV {uav_id} PH-RRT规划异常: {e}，使用平滑曲线")
                     path_points = self._generate_smooth_curve(current_pos, target_pos)
                     planning_successful = False # 新增：更新标志位
                 
                 # 绘制路径
                 line_style = '-' if planning_successful else '--'
-                print(f"[DEBUG] UAV {uav_id} 绘制路径: 点数={len(path_points)}, 线型={line_style}")
-                print(f"[DEBUG] UAV {uav_id} 路径范围: X[{path_points[:, 0].min():.1f}, {path_points[:, 0].max():.1f}], Y[{path_points[:, 1].min():.1f}, {path_points[:, 1].max():.1f}]")
+                if getattr(self.config, 'ENABLE_DEBUG', False):
+                    print(f"[DEBUG] UAV {uav_id} 绘制路径: 点数={len(path_points)}, 线型={line_style}")
+                    print(f"[DEBUG] UAV {uav_id} 路径范围: X[{path_points[:, 0].min():.1f}, {path_points[:, 0].max():.1f}], Y[{path_points[:, 1].min():.1f}, {path_points[:, 1].max():.1f}]")
                 
                 ax.plot(path_points[:, 0], path_points[:, 1], 
                        color=uav_color, 
                        linestyle= line_style,#'-' if task.get('is_sync_feasible', True) else '--', 
                        linewidth=2, alpha=0.9, zorder=3)
-                
-                print(f"[DEBUG] UAV {uav_id} 路径已绘制到图表")
+                if getattr(self.config, 'ENABLE_DEBUG', False):
+                    print(f"[DEBUG] UAV {uav_id} 路径已绘制到图表")
                 
                 # 添加步骤标记 - 优化：改进序列顺序的显示清晰度
                 mid_pos = path_points[len(path_points) // 2]
@@ -554,14 +568,15 @@ class PlanVisualizer:
             plt.savefig(img_filepath, dpi=300, format='jpg')
             # 移除重复的输出，只在ResultSaver中输出
         except Exception as e:
-            print(f"❌ 错误：无法保存结果图至 {img_filepath}")
-            print(f"📄 文件写入错误详情：")
-            print(f"   - 文件名: {base_filename}.jpg")
-            print(f"   - 存储位置: {output_dir}")
-            print(f"   - 完整路径: {img_filepath}")
-            print(f"   - 图表尺寸: {fig.get_size_inches()}")
-            print(f"   - 错误原因: {e}")
-            print(f"   - 错误类型: {type(e).__name__}")
+            if getattr(self.config, 'ENABLE_DEBUG', False):
+                print(f"❌ 错误：无法保存结果图至 {img_filepath}")
+                print(f"📄 文件写入错误详情：")
+                print(f"   - 文件名: {base_filename}.jpg")
+                print(f"   - 存储位置: {output_dir}")
+                print(f"   - 完整路径: {img_filepath}")
+                print(f"   - 图表尺寸: {fig.get_size_inches()}")
+                print(f"   - 错误原因: {e}")
+                print(f"   - 错误类型: {type(e).__name__}")
             
             # 尝试输出图表内容信息
             try:
@@ -570,7 +585,8 @@ class PlanVisualizer:
                 print(f"   - 输出目录是否存在: {os.path.exists(output_dir)}")
                 print(f"   - 输出目录权限: {os.access(output_dir, os.W_OK) if os.path.exists(output_dir) else 'N/A'}")
             except Exception as inner_e:
-                print(f"   - 无法获取详细信息: {inner_e}")
+                if getattr(self.config, 'ENABLE_DEBUG', False):
+                    print(f"   - 无法获取详细信息: {inner_e}")
         
         plt.close(fig)
         
@@ -750,16 +766,18 @@ class ModelEvaluator:
         try:
             # 创建深拷贝以防止数据污染
             final_plan_copy = copy.deepcopy(final_plan)
-            print(f"[DEBUG] 已创建 final_plan 深拷贝，防止数据污染")
+            if getattr(self.config, 'ENABLE_DEBUG', False):
+                print(f"[DEBUG] 已创建 final_plan 深拷贝，防止数据污染")
             
             # 使用副本调用评估函数
             return evaluate_plan(final_plan_copy, uavs, targets, **kwargs)
             
         except Exception as e:
-            print(f"[ERROR] 深拷贝操作失败: {type(e).__name__}: {e}")
-            print(f"[WARNING] 降级到使用原始对象进行评估")
-            print(f"[WARNING] 这可能导致 evaluate_plan 函数修改原始数据，存在数据污染风险")
-            print(f"[DEBUG] 建议检查 final_plan 数据结构是否包含不可序列化的对象")
+            if getattr(self.config, 'ENABLE_DEBUG', False):
+                print(f"[ERROR] 深拷贝操作失败: {type(e).__name__}: {e}")
+                print(f"[WARNING] 降级到使用原始对象进行评估")
+                print(f"[WARNING] 这可能导致 evaluate_plan 函数修改原始数据，存在数据污染风险")
+                print(f"[DEBUG] 建议检查 final_plan 数据结构是否包含不可序列化的对象")
             
             # 降级方案：使用原始对象但记录警告
             return evaluate_plan(final_plan, uavs, targets, **kwargs)
@@ -783,14 +801,16 @@ class ModelEvaluator:
             if results and 'completion_rate' in results:
                 # 使用推理结果中的完成率作为最终结果
                 evaluation_metrics['completion_rate'] = results['completion_rate']
-                print(f"[DEBUG] 使用推理结果中的完成率: {results['completion_rate']:.4f}")
+                if getattr(self.config, 'ENABLE_DEBUG', False):
+                    print(f"[DEBUG] 使用推理结果中的完成率: {results['completion_rate']:.4f}")
                 
                 # 如果有推理任务分配方案，使用推理结果覆盖evaluate_plan的结果
-                if 'inference_task_assignments' in results and 'inference_target_status' in results:
+                if 'inference_task_assignments' in results and 'inference_target_status' in results and getattr(self.config, 'ENABLE_DEBUG', False):
                     print(f"[DEBUG] 使用推理任务分配方案作为最终结果")
                     # 可以在这里添加逻辑来使用推理结果覆盖evaluate_plan的某些指标
             else:
-                print(f"[DEBUG] 使用evaluate_plan计算的完成率: {evaluation_metrics.get('completion_rate', 0):.4f}")
+                if getattr(self.config, 'ENABLE_DEBUG', False):
+                    print(f"[DEBUG] 使用evaluate_plan计算的完成率: {evaluation_metrics.get('completion_rate', 0):.4f}")
             
             # 生成可视化和报告
             training_time = 0.0  # 推理阶段无训练时间
@@ -827,7 +847,8 @@ class ModelEvaluator:
         
         # 如果提供了step_details，直接使用；否则从action_sequence重建
         if step_details:
-            print(f"[DEBUG] 使用提供的step_details构建执行计划，步骤数: {len(step_details)}")
+            if getattr(self.config, 'ENABLE_DEBUG', False):
+                print(f"[DEBUG] 使用提供的step_details构建执行计划，步骤数: {len(step_details)}")
             for step, details in enumerate(step_details):
                 uav_id = details['uav_id']
                 target_id = details['target_id']
@@ -852,12 +873,14 @@ class ModelEvaluator:
                     'is_sync_feasible': True # 推理中默认为真
                 }
                 uav_assignments[uav_id].append(task_detail)
-                print(f"[DEBUG] 添加任务到UAV {uav_id}: {task_detail}")
+                if getattr(self.config, 'ENABLE_DEBUG', False):
+                    print(f"[DEBUG] 添加任务到UAV {uav_id}: {task_detail}")
 
                 # 更新UAV的当前位置，用于计算下一段航程的距离
                 temp_uav_positions[uav_id] = target.position.copy()
         else:
-            print(f"[DEBUG] 从action_sequence重建执行计划，动作数: {len(action_sequence)}")
+            if getattr(self.config, 'ENABLE_DEBUG', False):
+                print(f"[DEBUG] 从action_sequence重建执行计划，动作数: {len(action_sequence)}")
             # 从action_sequence重建（备用方案）
             for step, action_idx in enumerate(action_sequence):
                 try:
