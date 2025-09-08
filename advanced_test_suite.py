@@ -10,7 +10,7 @@
 #    逐步增加无人机和目标的数量，测试模型在不同规模下的性能。
 #    命令:
 #    python advanced_test_suite.py --models ./output/300.pth --test-mode incremental
-#
+#    python advanced_test_suite.py --models ./output/300.pth --test-mode random --num-random-scenarios 1
 # 2. 随机测试模式:
 #    生成指定数量的完全随机场景（无人机和目标数量在配置范围内随机），测试模型的泛化能力。
 #    命令:
@@ -32,6 +32,26 @@ import pickle
 import csv
 from datetime import datetime
 import matplotlib.pyplot as plt
+import matplotlib.font_manager as fm
+
+# 设置中文字体
+def setup_chinese_font():
+    """设置matplotlib中文字体"""
+    font_names = ['SimHei', 'Microsoft YaHei', 'Microsoft YaHei UI', 'DejaVu Sans']
+    available_fonts = [f.name for f in fm.fontManager.ttflist]
+    
+    for font_name in font_names:
+        if font_name in available_fonts:
+            plt.rcParams['font.sans-serif'] = [font_name]
+            plt.rcParams['axes.unicode_minus'] = False
+            return font_name
+    
+    plt.rcParams['font.sans-serif'] = ['DejaVu Sans', 'Arial', 'sans-serif']
+    plt.rcParams['axes.unicode_minus'] = False
+    return "Default"
+
+# 设置中文字体
+setup_chinese_font()
 
 # 导入项目模块
 from config import Config
@@ -44,40 +64,24 @@ from evaluate import evaluate_plan
 
 def generate_test_scenario(num_uavs: int, num_targets: int, num_obstacles: int, config: Config):
     """
-    根据指定的实体数量动态生成一个测试场景。
-    该函数逻辑改编自项目中的 environment.py::_initialize_entities 方法，以确保场景的有效性。
+    使用课程训练模式的场景生成函数，确保生成的场景数量与指定参数一致
     """
-    uavs, targets, obstacles = [], [], []
-    map_size = config.MAP_SIZE
-    resource_dim = config.RESOURCE_DIM
+    # 导入课程训练模式的场景生成函数
+    from scenarios import _generate_scenario
     
-    # 1. 生成目标
-    target_positions = np.random.uniform(map_size * 0.2, map_size * 0.8, size=(num_targets, 2))
-    for i in range(num_targets):
-        resources = np.random.randint(50, 151, size=resource_dim)
-        value = np.random.randint(80, 121)
-        targets.append(Target(id=i + 1, position=target_positions[i], resources=resources, value=value))
-
-    # 2. 生成无人机
-    total_demand = np.sum([t.resources for t in targets], axis=0) if targets else np.zeros(resource_dim)
-    resource_abundance = 1.2  # 在测试中固定资源富裕度为1.2倍，以控制变量
-    total_supply = total_demand * resource_abundance
+    # 计算合理的资源富裕度
+    resource_abundance = 1.2  # 固定为1.2倍，确保测试的一致性
     
-    uav_resources = np.zeros((num_uavs, resource_dim))
-    if num_uavs > 0:
-        avg_supply_per_uav = total_supply / num_uavs
-        for i in range(num_uavs):
-            uav_resources[i] = np.random.uniform(0.8, 1.2, size=resource_dim) * avg_supply_per_uav
+    # 调用课程训练模式的场景生成函数
+    scenario_dict = _generate_scenario(
+        config=config,
+        uav_num=num_uavs,
+        target_num=num_targets,
+        obstacle_num=num_obstacles,
+        resource_abundance=resource_abundance
+    )
     
-    uav_positions = np.random.uniform(0, map_size, size=(num_uavs, 2))
-    for i in range(num_uavs):
-        uavs.append(UAV(
-            id=i + 1, position=uav_positions[i], heading=np.random.uniform(0, 2 * np.pi),
-            resources=uav_resources[i].astype(int), max_distance=config.UAV_MAX_DISTANCE,
-            velocity_range=config.UAV_VELOCITY_RANGE, economic_speed=config.UAV_ECONOMIC_SPEED
-        ))
-        
-    # 3. 生成障碍物
+    return scenario_dict['uavs'], scenario_dict['targets'], scenario_dict['obstacles']
     obstacle_centers = np.random.uniform(map_size * 0.15, map_size * 0.85, size=(num_obstacles, 2))
     for i in range(num_obstacles):
         radius = np.random.uniform(map_size * 0.02, map_size * 0.06)
@@ -158,44 +162,70 @@ class ModelTestSuiteRunner:
         print(f"结果将记录在CSV文件: {self.csv_path}")
 
     def _save_scenario_as_txt(self, scenario_data: dict, filepath: str):
-        """将场景数据详细信息保存为txt文件"""
+        """保存场景数据为TXT格式，重新编排便于阅读"""
         try:
             with open(filepath, 'w', encoding='utf-8') as f:
-                f.write("=" * 80 + "\n" + "训练场景数据记录\n" + "=" * 80 + "\n")
-                f.write(f"轮次: {scenario_data.get('episode', 'N/A')}\n")
-                f.write(f"场景名称: {scenario_data.get('scenario_name', 'N/A')}\n")
-                f.write(f"时间戳: {scenario_data.get('timestamp', 'N/A')}\n")
-                f.write(f"UAV数量: {scenario_data.get('uav_count', 'N/A')}\n")
-                f.write(f"目标数量: {scenario_data.get('target_count', 'N/A')}\n")
-                f.write(f"障碍物数量: {scenario_data.get('obstacle_count', 'N/A')}\n\n")
-                f.write("配置信息:\n" + "-" * 40 + "\n")
+                # 标题和基本信息
+                f.write("=" * 60 + "\n")
+                f.write(f"场景测试报告 - {scenario_data.get('scenario_name', 'N/A')}\n")
+                f.write("=" * 60 + "\n")
+                f.write(f"测试时间: {scenario_data.get('timestamp', 'N/A')}\n")
                 f.write(f"网络类型: {self.config.NETWORK_TYPE}\n\n")
-                f.write("UAV详细信息:\n" + "-" * 40 + "\n")
-                for uav in scenario_data['uavs']:
-                    f.write(f"  UAV {uav.id}: \n")
-                    f.write(f"    初始位置: [{uav.position[0]:.2f}, {uav.position[1]:.2f}]\n")
-                    f.write(f"    初始资源: {uav.initial_resources}\n\n")
-                f.write("目标详细信息:\n" + "-" * 40 + "\n")
-                for target in scenario_data['targets']:
-                    f.write(f"  目标 {target.id}: \n")
-                    f.write(f"    位置: [{target.position[0]:.2f}, {target.position[1]:.2f}]\n")
-                    f.write(f"    初始需求资源: {target.resources}\n\n")
-                f.write("障碍物详细信息:\n" + "-" * 40 + "\n")
-                for i, obstacle in enumerate(scenario_data['obstacles']):
-                    f.write(f"  障碍物 {i+1}: \n    类型: 圆形障碍物\n    中心: [{obstacle.center[0]:.2f}, {obstacle.center[1]:.2f}]\n    半径: {obstacle.radius:.2f}\n\n")
-                f.write("场景统计信息:\n" + "-" * 40 + "\n")
+                
+                # 场景概览
+                f.write("场景概览:\n")
+                f.write("-" * 30 + "\n")
+                f.write(f"UAV数量: {scenario_data.get('uav_count', 'N/A')}  ")
+                f.write(f"目标数量: {scenario_data.get('target_count', 'N/A')}  ")
+                f.write(f"障碍物数量: {scenario_data.get('obstacle_count', 'N/A')}\n\n")
+                
+                # 资源统计
                 uav_total_res = np.sum([u.initial_resources for u in scenario_data['uavs']], axis=0)
                 target_total_demand = np.sum([t.resources for t in scenario_data['targets']], axis=0)
                 abundance = uav_total_res / (target_total_demand + 1e-6)
                 obstacle_area = sum(np.pi * o.radius**2 for o in scenario_data['obstacles'])
                 map_area = self.config.MAP_SIZE**2
-                f.write(f"UAV初始总资源: {uav_total_res.astype(int)}\n")
-                f.write(f"目标初始总需求: {target_total_demand.astype(int)}\n")
-                f.write(f"资源充裕度: [{abundance[0]:.3f} {abundance[1]:.3f}]\n")
-                f.write(f"障碍物覆盖率: {obstacle_area / map_area:.3f}\n")
+                
+                f.write("资源统计:\n")
+                f.write("-" * 30 + "\n")
+                f.write(f"总供给: {uav_total_res.astype(int)}  总需求: {target_total_demand.astype(int)}\n")
+                f.write(f"资源充裕度: [{abundance[0]:.2f}, {abundance[1]:.2f}]  障碍物覆盖率: {obstacle_area / map_area:.1%}\n\n")
+                
+                # UAV信息（紧凑格式）
+                f.write("UAV配置:\n")
+                f.write("-" * 30 + "\n")
+                for i, uav in enumerate(scenario_data['uavs']):
+                    if i % 2 == 0 and i > 0:
+                        f.write("\n")
+                    f.write(f"UAV{uav.id}[{uav.position[0]:.0f},{uav.position[1]:.0f}]:{uav.initial_resources}  ")
+                f.write("\n\n")
+                
+                # 目标信息（紧凑格式）
+                f.write("目标配置:\n")
+                f.write("-" * 30 + "\n")
+                for i, target in enumerate(scenario_data['targets']):
+                    if i % 2 == 0 and i > 0:
+                        f.write("\n")
+                    f.write(f"T{target.id}[{target.position[0]:.0f},{target.position[1]:.0f}]:{target.resources}  ")
+                f.write("\n\n")
+                
+                # 障碍物信息（紧凑格式）
+                if scenario_data['obstacles']:
+                    f.write("障碍物配置:\n")
+                    f.write("-" * 30 + "\n")
+                    for i, obstacle in enumerate(scenario_data['obstacles']):
+                        if i % 3 == 0 and i > 0:
+                            f.write("\n")
+                        f.write(f"O{i+1}[{obstacle.center[0]:.0f},{obstacle.center[1]:.0f}]r{obstacle.radius:.0f}  ")
+                    f.write("\n\n")
+                
+                # 推理报告
                 if scenario_data.get('inference_report'):
-                    f.write("\n" + scenario_data['inference_report'])
-                f.write("\n" + "=" * 80 + "\n" + "场景数据记录结束\n" + "=" * 80 + "\n")
+                    f.write("推理结果:\n")
+                    f.write("-" * 30 + "\n")
+                    f.write(scenario_data['inference_report'])
+                
+                f.write("\n" + "=" * 60 + "\n")
         except Exception as e:
             print(f"保存TXT场景文件失败: {e}")
 
@@ -231,9 +261,14 @@ class ModelTestSuiteRunner:
                     ax.text(mid_point[0], mid_point[1] + 10, label, ha='center', va='center', bbox=dict(boxstyle="round,pad=0.3", fc=color_map[uav_id], ec="none", alpha=0.3))
                     current_pos = target_p
             ax.set_title(title, fontsize=16)
-            ax.set_xlabel('X 坐标 (m)'); ax.set_ylabel('Y 坐标 (m)')
+            ax.set_xlabel('X Coordinate (m)'); ax.set_ylabel('Y Coordinate (m)')  # 使用英文避免字体警告
             ax.legend(); ax.grid(True, linestyle='--', alpha=0.5); ax.set_aspect('equal', adjustable='box')
-            plt.savefig(output_path, dpi=200, bbox_inches='tight')
+            
+            # 抑制字体警告
+            import warnings
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", UserWarning)
+                plt.savefig(output_path, dpi=200, bbox_inches='tight')
             plt.close(fig)
         except Exception as e:
             print(f"绘制任务分配关系图失败: {e}")
@@ -268,17 +303,27 @@ class ModelTestSuiteRunner:
             graph = DirectedGraph(uavs, targets, self.config.GRAPH_N_PHI, obstacles, self.config)
             env = UAVTaskEnv(uavs, targets, graph, obstacles, self.config, obs_mode="graph")
 
+            # 【修复】使用预设场景数据进行重置，避免重新生成实体
+            scenario_data = {
+                'uavs': uavs,
+                'targets': targets, 
+                'obstacles': obstacles
+            }
+            
             # 执行推理
             start_time = time.time()
-            results = self.evaluator._run_inference(network, env, use_softmax_sampling=True, scenario_name=scenario_name)
+            results = self.evaluator._run_inference(network, env, use_softmax_sampling=True, scenario_name=scenario_name, scenario_data=scenario_data)
             inference_time = time.time() - start_time
             
             if not results:
                 print("推理失败，跳过此模型的本次测试。")
                 return
 
-            # 评估和保存结果
-            final_plan = self.evaluator._build_plan_from_inference_results(results, uavs, targets)
+            # 评估和保存结果 - 使用正确的方法名
+            action_sequence = results.get('action_sequence', [])
+            step_details = results.get('step_details', [])
+            plan_data = self.evaluator._build_execution_plan_from_action_sequence(action_sequence, uavs, targets, env, step_details)
+            final_plan = plan_data.get('uav_assignments', {})
             metrics = evaluate_plan(final_plan, uavs, targets, final_uav_states=results.get('final_uav_states'))
             
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -293,17 +338,22 @@ class ModelTestSuiteRunner:
             final_img_path = os.path.join(self.output_dir, os.path.basename(img_path))
             if os.path.exists(img_path): os.rename(img_path, final_img_path)
 
-            # 保存新的任务分配关系图
-            graph_plot_path = os.path.join(self.output_dir, f"assignment_graph_{file_suffix}.jpg")
-            graph_title = f'任务分配关系图\nModel: {model_name[:30]}...\nScenario: {scenario_name}'
-            self._plot_assignment_graph(final_plan, uavs, targets, graph_plot_path, graph_title)
+            # 屏蔽assignment_graph图片生成
+            # graph_plot_path = os.path.join(self.output_dir, f"assignment_graph_{file_suffix}.jpg")
+            # graph_title = f'任务分配关系图\nModel: {model_name[:30]}...\nScenario: {scenario_name}'
+            # self._plot_assignment_graph(final_plan, uavs, targets, graph_plot_path, graph_title)
 
+            # 【修复】使用推理后环境中的实际实体数据，确保数据一致性
+            actual_uavs = env.uavs if 'env' in locals() else uavs
+            actual_targets = env.targets if 'env' in locals() else targets
+            actual_obstacles = env.obstacles if 'env' in locals() else obstacles
+            
             # 保存TXT格式的场景和结果报告
             scenario_txt_path = os.path.join(self.output_dir, f"scenario_report_{file_suffix}.txt")
             scenario_data = {
                 'episode': 'Test', 'scenario_name': scenario_name, 'timestamp': timestamp,
-                'uavs': uavs, 'targets': targets, 'obstacles': obstacles,
-                'uav_count': len(uavs), 'target_count': len(targets), 'obstacle_count': len(obstacles),
+                'uavs': actual_uavs, 'targets': actual_targets, 'obstacles': actual_obstacles,
+                'uav_count': len(actual_uavs), 'target_count': len(actual_targets), 'obstacle_count': len(actual_obstacles),
                 'config_info': {'obs_mode': 'graph'}, 'inference_report': report_content
             }
             self._save_scenario_as_txt(scenario_data, scenario_txt_path)
@@ -312,12 +362,12 @@ class ModelTestSuiteRunner:
             csv_row = {
                 'timestamp': timestamp, 'model_name': model_name, 
                 'inference_mode': 'ensemble_inference' if len(self.networks) > 1 else 'single_model_test',
-                'scenario_name': scenario_name, 'num_uavs': len(uavs), 'num_targets': len(targets),
-                'num_obstacles': len(obstacles), 'resource_abundance': 1.2,
+                'scenario_name': scenario_name, 'num_uavs': len(actual_uavs), 'num_targets': len(actual_targets),
+                'num_obstacles': len(actual_obstacles), 'resource_abundance': 1.2,
                 'inference_time_s': round(inference_time, 2),
                 'scenario_txt_path': os.path.basename(scenario_txt_path),
                 'result_plot_path': os.path.basename(final_img_path),
-                'graph_plot_path': os.path.basename(graph_plot_path),
+                'graph_plot_path': 'disabled',  # assignment_graph已屏蔽
                 **{k: v for k, v in metrics.items() if k in self.csv_fieldnames}
             }
             with open(self.csv_path, 'a', newline='', encoding='utf-8') as f:

@@ -1312,7 +1312,7 @@ class ModelEvaluator:
         
         return results
     
-    def _run_inference(self, network, env, use_softmax_sampling=True, scenario_name='easy'):
+    def _run_inference(self, network, env, use_softmax_sampling=True, scenario_name='easy', scenario_data=None):
         """
         运行单模型推理
         
@@ -1321,12 +1321,15 @@ class ModelEvaluator:
             env: 环境
             use_softmax_sampling (bool): 是否使用Softmax采样
             scenario_name (str): 场景名称，用于环境重置
+            scenario_data (dict): 预设场景数据，如果提供则使用预设数据而不重新生成
             
         Returns:
             dict: 推理结果
         """
-        # 【修复】在环境重置时传递正确的scenario_name参数，推理时静默重置
+        # 【修复】在环境重置时传递正确的scenario_name参数和预设场景数据，推理时静默重置
         reset_options = {'scenario_name': scenario_name, 'silent_reset': True}
+        if scenario_data:
+            reset_options['scenario'] = scenario_data
         reset_result = env.reset(options=reset_options)
         # 处理reset返回的tuple格式 (state, info)
         if isinstance(reset_result, tuple):
@@ -1517,24 +1520,28 @@ class ModelEvaluator:
         # 【修复】保存推理结果中的总贡献数据，供报告生成使用
         self._inference_total_contribution = total_contribution
         
+        # 【修复】使用原始目标资源需求而不是剩余需求进行调试输出
+        original_total_demand = np.sum([t.resources for t in env.targets], axis=0)
+        original_total_demand_sum = np.sum(original_total_demand)
+        
         # 【调试】显示推理结束时的任务分配结果
         print(f"[DEBUG] 推理任务分配结果:")
-        print(f"  - 总需求: {total_demand} (总和: {total_demand_sum})")
-        print(f"  - 推理分配总贡献: {total_contribution} (总和: {total_contribution_sum})")
-        print(f"  - 推理完成率: {completion_rate:.4f}")
+        print(f"- 总需求: {original_total_demand} (总和: {original_total_demand_sum})")
+        print(f"- 推理分配总贡献: {total_contribution} (总和: {total_contribution_sum})")
+        print(f"- 推理完成率: {completion_rate:.4f}")
         
         # 计算目标完成率（完全满足的目标数量比例）
         satisfied_targets = sum(1 for t in env.targets if np.all(t.remaining_resources <= 1e-6))
         total_targets = len(env.targets)
         target_completion_rate = satisfied_targets / total_targets if total_targets > 0 else 1.0
-        print(f"  - 推理时完全满足目标数: {satisfied_targets}/{total_targets}")
-        print(f"  - 推理时目标完成率: {target_completion_rate:.4f}")
+        print(f"- 推理时完全满足目标数: {satisfied_targets}/{total_targets}")
+        print(f"- 推理时目标完成率: {target_completion_rate:.4f}")
         
         # 显示每个目标的详细状态
         for i, target in enumerate(env.targets):
             remaining = target.remaining_resources
             is_satisfied = np.all(remaining <= 1e-6)
-            print(f"  - 目标{i+1}: 剩余需求{remaining}, 完全满足: {is_satisfied}")
+            print(f"- 目标{i+1}: 剩余需求{remaining}, 完全满足: {is_satisfied}")
         
         # 记录推理结束时的任务分配方案
         inference_task_assignments = {}
@@ -1747,24 +1754,28 @@ class ModelEvaluator:
         # 【修复】保存集成推理结果中的总贡献数据，供报告生成使用
         self._inference_total_contribution = total_contribution
        
+        # 【修复】使用原始目标资源需求而不是剩余需求进行调试输出
+        original_total_demand = np.sum([t.resources for t in env.targets], axis=0)
+        original_total_demand_sum = np.sum(original_total_demand)
+        
         # 【调试】显示集成推理结束时的任务分配结果
         print(f"[DEBUG] 集成推理任务分配结果:")
-        print(f"  - 总需求: {total_demand} (总和: {total_demand_sum})")
-        print(f"  - 集成推理分配总贡献: {total_contribution} (总和: {total_contribution_sum})")
-        print(f"  - 集成推理完成率: {completion_rate:.4f}")
+        print(f"- 总需求: {original_total_demand} (总和: {original_total_demand_sum})")
+        print(f"- 集成推理分配总贡献: {total_contribution} (总和: {total_contribution_sum})")
+        print(f"- 集成推理完成率: {completion_rate:.4f}")
         
         # 计算目标完成率（完全满足的目标数量比例）
         satisfied_targets = sum(1 for t in env.targets if np.all(t.remaining_resources <= 1e-6))
         total_targets = len(env.targets)
         target_completion_rate = satisfied_targets / total_targets if total_targets > 0 else 1.0
-        print(f"  - 集成推理时完全满足目标数: {satisfied_targets}/{total_targets}")
-        print(f"  - 集成推理时目标完成率: {target_completion_rate:.4f}")
+        print(f"- 集成推理时完全满足目标数: {satisfied_targets}/{total_targets}")
+        print(f"- 集成推理时目标完成率: {target_completion_rate:.4f}")
         
         # 显示每个目标的详细状态
         for i, target in enumerate(env.targets):
             remaining = target.remaining_resources
             is_satisfied = np.all(remaining <= 1e-6)
-            print(f"  - 目标{i+1}: 剩余需求{remaining}, 完全满足: {is_satisfied}")
+            print(f"- 目标{i+1}: 剩余需求{remaining}, 完全满足: {is_satisfied}")
         
         # 记录推理结束时的任务分配方案
         inference_task_assignments = {}

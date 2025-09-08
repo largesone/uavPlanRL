@@ -1617,12 +1617,49 @@ class UAVTaskEnv(gym.Env):
         """
         # --- 第一部分：从config中获取模板，确定实体数量和参数 ---
         
-        # [新增] 验证场景名称
-        if scenario_name not in self.config.SCENARIO_TEMPLATES:
-            print(f"警告: 场景名称 '{scenario_name}' 不存在，使用medium场景")
-            scenario_name = 'medium'
+        # [修复] 验证场景名称 - 支持随机场景名称
+        use_specified_counts = False
+        specified_uav_count = None
+        specified_target_count = None
         
-        template = self.config.SCENARIO_TEMPLATES[scenario_name]
+        if scenario_name not in self.config.SCENARIO_TEMPLATES:
+            # 检查是否是随机场景名称（格式：random*_*uav_*tgt）
+            if scenario_name.startswith('random') and 'uav_' in scenario_name and 'tgt' in scenario_name:
+                # 对于随机场景，从名称中提取信息并使用合适的模板
+                try:
+                    import re
+                    # 使用正则表达式提取UAV和目标数量
+                    uav_match = re.search(r'(\d+)uav', scenario_name)
+                    tgt_match = re.search(r'(\d+)tgt', scenario_name)
+                    
+                    if uav_match and tgt_match:
+                        specified_uav_count = int(uav_match.group(1))
+                        specified_target_count = int(tgt_match.group(1))
+                        use_specified_counts = True
+                        
+                        # 根据UAV和目标数量选择合适的模板
+                        if specified_uav_count <= 7 and specified_target_count <= 4:
+                            template_name = 'easy'
+                        elif specified_uav_count <= 15 and specified_target_count <= 7:
+                            template_name = 'medium'
+                        else:
+                            template_name = 'hard'
+                        
+                        template = self.config.SCENARIO_TEMPLATES[template_name]
+                        print(f"[DEBUG] 随机场景 '{scenario_name}' (UAV:{specified_uav_count}, 目标:{specified_target_count}) 使用模板: {template_name}")
+                    else:
+                        raise ValueError("无法提取UAV或目标数量")
+                        
+                except (ValueError, AttributeError) as e:
+                    print(f"警告: 无法解析随机场景名称 '{scenario_name}' 格式 ({e})，使用medium场景")
+                    scenario_name = 'medium'
+                    template = self.config.SCENARIO_TEMPLATES[scenario_name]
+            else:
+                print(f"警告: 场景名称 '{scenario_name}' 不存在，使用medium场景")
+                scenario_name = 'medium'
+                template = self.config.SCENARIO_TEMPLATES[scenario_name]
+        else:
+            template = self.config.SCENARIO_TEMPLATES[scenario_name]
         if getattr(self.config, 'ENABLE_SCENARIO_DEBUG', False):
             print(f"[DEBUG] 使用场景模板: {scenario_name} -> {template}")
         
@@ -1633,10 +1670,19 @@ class UAVTaskEnv(gym.Env):
         if getattr(self.config, 'ENABLE_SCENARIO_DEBUG', False):
             print(f"[DEBUG] 随机种子: {unique_seed}")
         
-        # 严格按照模板生成数量，确保不超出限制（修复：包含上限值）
-        uav_num = np.random.randint(template['uav_num_range'][0], template['uav_num_range'][1] + 1)
-        target_num = np.random.randint(template['target_num_range'][0], template['target_num_range'][1] + 1)
-        obstacle_num = np.random.randint(template['obstacle_num_range'][0], template['obstacle_num_range'][1] + 1)
+        # 【修复】根据是否有指定数量来决定生成方式
+        if use_specified_counts:
+            # 使用场景名称中指定的数量
+            uav_num = specified_uav_count
+            target_num = specified_target_count
+            # 障碍物数量仍然随机生成
+            obstacle_num = np.random.randint(template['obstacle_num_range'][0], template['obstacle_num_range'][1] + 1)
+        else:
+            # 严格按照模板生成数量，确保不超出限制（修复：包含上限值）
+            uav_num = np.random.randint(template['uav_num_range'][0], template['uav_num_range'][1] + 1)
+            target_num = np.random.randint(template['target_num_range'][0], template['target_num_range'][1] + 1)
+            obstacle_num = np.random.randint(template['obstacle_num_range'][0], template['obstacle_num_range'][1] + 1)
+        
         resource_abundance = np.random.uniform(*template['resource_abundance_range'])
         
         # [新增] 严格验证生成的数量是否符合模板约束
