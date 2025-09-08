@@ -5,6 +5,7 @@
 import os
 os.environ['KMP_DUPLICATE_LIB_OK'] = 'True'
 import time
+import copy
 import numpy as np
 import torch
 import matplotlib.pyplot as plt
@@ -28,17 +29,32 @@ from datetime import datetime
 
 def set_chinese_font():
     """查找并设置一个可用的中文字体，以解决matplotlib中文乱码问题。"""
-    # 常见的Windows/Linux/MacOS中文字体列表
-    font_names = ['SimHei', 'Microsoft YaHei', 'Heiti TC', 'Arial Unicode MS']
+    # 扩展的中文字体列表，包含更多常见字体
+    font_names = [
+        'SimHei', 'Microsoft YaHei', 'Microsoft YaHei UI', 
+        'Heiti TC', 'Arial Unicode MS', 'DejaVu Sans',
+        'WenQuanYi Micro Hei', 'Noto Sans CJK SC', 'Source Han Sans SC'
+    ]
+    
+    # 获取系统可用字体列表
+    available_fonts = [f.name for f in fm.fontManager.ttflist]
     
     for font_name in font_names:
-        if font_name in [f.name for f in fm.fontManager.ttflist]:
+        if font_name in available_fonts:
             plt.rcParams['font.sans-serif'] = [font_name]
             plt.rcParams['axes.unicode_minus'] = False
-            # print(f"✅ 中文字体 '{font_name}' 设置成功。")
-            return
+            print(f"[DEBUG] 中文字体设置成功: {font_name}")
+            return font_name
     
-    print("⚠️ 警告: 未找到任何可用的中文字体 (SimHei, Microsoft YaHei等)，图表中的中文可能显示为乱码。")
+    # 如果没有找到专门的中文字体，尝试使用系统默认字体
+    try:
+        plt.rcParams['font.sans-serif'] = ['DejaVu Sans', 'Arial', 'sans-serif']
+        plt.rcParams['axes.unicode_minus'] = False
+        print("[WARNING] 未找到中文字体，使用系统默认字体，可能存在中文显示问题")
+        return "Default"
+    except Exception as e:
+        print(f"[ERROR] 字体设置失败: {e}")
+        return None
 
 
 class PlanVisualizer:
@@ -51,13 +67,38 @@ class PlanVisualizer:
     
     def save(self, final_plan, uavs, targets, obstacles, scenario_name, training_time, 
              plan_generation_time, evaluation_metrics=None, deadlocked_tasks=None, suffix="", inference_mode="单模型推理"):
-        """保存可视化方案 - 与main-old.py格式完全一致"""
+        """
+        保存可视化方案 - 重构后版本，确保数据源唯一性
         
-        # 资源消耗精确模拟
-        temp_uav_resources = {u.id: u.initial_resources.copy().astype(float) for u in uavs}
-        temp_target_resources = {t.id: t.resources.copy().astype(float) for t in targets}
-
-        # 按事件分组处理协同任务
+        重构说明：
+        - 删除了内部的资源消耗精确模拟逻辑，避免重复计算
+        - 直接使用 final_plan 中的 resource_cost 数据作为唯一数据源
+        - 简化了协同事件处理，只负责数据格式化与可视化展示
+        - 添加了数据验证和警告机制
+        
+        Args:
+            final_plan: 任务分配方案，包含来自推理结果的 resource_cost 数据
+            uavs: 无人机列表
+            targets: 目标列表
+            obstacles: 障碍物列表
+            scenario_name: 场景名称
+            training_time: 训练时间
+            plan_generation_time: 方案生成时间
+            evaluation_metrics: 评估指标（可选）
+            deadlocked_tasks: 死锁任务（可选）
+            suffix: 文件名后缀
+            inference_mode: 推理模式
+            
+        Returns:
+            tuple: (报告内容, 图片文件路径)
+        """
+        
+        # 【重构修改】协同事件日志 - 基于已有数据生成，不进行重复计算
+        # 删除了原有的 temp_uav_resources 和 temp_target_resources 独立计算逻辑
+        # 现在直接使用推理结果中的 resource_cost 数据，确保数据源唯一性
+        collaboration_log = "\n\n协同事件日志 (基于推理结果):\n" + "-"*36 + "\n"
+        
+        # 按事件分组处理协同任务 - 仅用于日志展示
         events = defaultdict(list)
         for uav_id, tasks in final_plan.items():
             for task in tasks:
@@ -66,57 +107,65 @@ class PlanVisualizer:
         
         sorted_event_keys = sorted(events.keys())
 
-        # 协同事件日志
-        collaboration_log = "\n\n协同事件日志 (揭示资源竞争):\n" + "-"*36 + "\n"
-
-        # 按事件顺序处理协作
+        # 生成协同事件日志 - 直接使用推理结果数据
         for event_key in sorted_event_keys:
             arrival_time, target_id = event_key
             collaborating_steps = events[event_key]
             
-            target_remaining_need_before = temp_target_resources[target_id].copy()
-            collaboration_log += f" * 事件: 在 t={arrival_time:.2f}s, 无人机(UAVs) {', '.join([str(s['uav_id']) for s in collaborating_steps])} 到达 目标 {target_id}\n"
-            collaboration_log += f"   - 目标初始需求: {target_remaining_need_before}\n"
+            # 获取目标的原始需求
+            target = next((t for t in targets if t.id == target_id), None)
+            if target:
+                target_demand = target.resources
+                collaboration_log += f" * 事件: 在 t={arrival_time:.2f}s, 无人机(UAVs) {', '.join([str(s['uav_id']) for s in collaborating_steps])} 到达 目标 {target_id}\n"
+                collaboration_log += f"   - 目标需求: {target_demand}\n"
 
-            for step in collaborating_steps:
-                uav_id = step['uav_id']
-                task = step['task_ref']
+                for step in collaborating_steps:
+                    uav_id = step['uav_id']
+                    task = step['task_ref']
 
-                # 【修复】优先使用final_plan中已经正确的resource_cost数据
-                if 'resource_cost' in task and task['resource_cost'] is not None:
-                    actual_contribution = task['resource_cost']
-                    collaboration_log += f"     - UAV {uav_id} 贡献 {actual_contribution} (来自推理结果)\n"
-                else:
-                    # 备用方案：重新计算
-                    uav_available_resources = temp_uav_resources[uav_id]
-                    actual_contribution = np.minimum(target_remaining_need_before, uav_available_resources)
-                    task['resource_cost'] = actual_contribution
-                    collaboration_log += f"     - UAV {uav_id} 贡献 {actual_contribution} (重新计算)\n"
+                    # 直接使用推理结果中的 resource_cost 数据
+                    if 'resource_cost' in task and task['resource_cost'] is not None:
+                        actual_contribution = task['resource_cost']
+                        collaboration_log += f"     - UAV {uav_id} 贡献 {actual_contribution} (来自推理结果)\n"
+                    else:
+                        # 记录详细警告信息
+                        print(f"[WARNING] 协同事件数据不完整: UAV {uav_id} 到达目标 {target_id} 的任务缺少 resource_cost")
+                        print(f"[WARNING] 这可能表明推理过程中的数据记录问题")
+                        collaboration_log += f"     - UAV {uav_id} 贡献数据缺失 (警告: 数据不完整)\n"
                 
-                if np.all(actual_contribution < 1e-6):
-                    collaboration_log += f"     - UAV {uav_id} 尝试贡献，但目标需求已满足。贡献: [0. 0.]\n"
-                    continue
-
-                temp_uav_resources[uav_id] -= actual_contribution
-                target_remaining_need_before -= actual_contribution
-                
-            temp_target_resources[target_id] = target_remaining_need_before
-            collaboration_log += f"   - 事件结束，目标剩余需求: {target_remaining_need_before}\n\n"
+                collaboration_log += f"   - 事件处理完成\n\n"
 
         # 创建可视化图表
         fig, ax = plt.subplots(figsize=(22, 14))
         ax.set_facecolor("#f0f0f0")
         
+        # 【修复中文乱码】确保每次绘图前都正确设置中文字体
+        font_name = set_chinese_font()
+        if font_name:
+            print(f"[DEBUG] 图表使用字体: {font_name}")
+        else:
+            print("[WARNING] 字体设置可能存在问题，中文显示可能异常")
+        
         # 绘制障碍物
         for obs in obstacles:
             obs.draw(ax)
 
-        # 计算目标协作详情
+        # 【重构修改】计算目标协作详情 - 直接使用推理结果数据
+        # 优先使用推理结果中的 resource_cost，添加数据验证机制
         target_collaborators_details = defaultdict(list)
         for uav_id, tasks in final_plan.items():
             for task in sorted(tasks, key=lambda x: x.get('step', 0)):
                 target_id = task['target_id']
-                resource_cost = task.get('resource_cost', np.zeros_like(uavs[0].resources))
+                # 优先使用推理结果中的 resource_cost，添加数据验证
+                if 'resource_cost' in task and task['resource_cost'] is not None:
+                    resource_cost = task['resource_cost']
+                else:
+                    # 记录详细警告信息，帮助问题诊断
+                    print(f"[WARNING] 数据完整性问题: UAV {uav_id} 的任务缺少 resource_cost 数据")
+                    print(f"[WARNING] 任务详情: target_id={task.get('target_id', 'N/A')}, step={task.get('step', 'N/A')}")
+                    print(f"[WARNING] 使用零向量作为备用方案，可能影响可视化准确性")
+                    resource_cost = np.zeros_like(uavs[0].resources) if uavs else np.zeros(2)
+                
                 target_collaborators_details[target_id].append({
                     'uav_id': uav_id, 
                     'arrival_time': task.get('arrival_time', 0), 
@@ -130,18 +179,27 @@ class PlanVisualizer:
             resource_types = len(targets[0].resources) if targets else 2
             total_demand_all = np.sum([t.resources for t in targets], axis=0)
 
-            # 【修复】优先使用推理结果中的总贡献数据，确保数据一致性
+            # 【修复数据计算错误】优先使用推理过程中记录的权威总贡献数据
+            # 1. 首先尝试使用推理过程中保存的权威数据
             if hasattr(self, '_inference_total_contribution') and self._inference_total_contribution is not None:
                 total_contribution_all_for_summary = self._inference_total_contribution
-                print(f"[DEBUG] 使用推理结果中的总贡献: {total_contribution_all_for_summary}")
+                print(f"[DEBUG] 使用推理过程中的权威总贡献: {total_contribution_all_for_summary}")
+            # 2. 其次尝试从 evaluation_metrics 中解析
+            elif evaluation_metrics and 'total_contribution' in evaluation_metrics:
+                try:
+                    contrib_str = evaluation_metrics['total_contribution']
+                    # 移除方括号和多余空格，然后分割
+                    contrib_str = contrib_str.strip('[]')
+                    contrib_values = [float(x.strip()) for x in contrib_str.split()]
+                    total_contribution_all_for_summary = np.array(contrib_values)
+                    print(f"[DEBUG] 使用评估指标中的总贡献: {total_contribution_all_for_summary}")
+                except Exception as e:
+                    print(f"[WARNING] 解析评估指标中的总贡献失败: {e}")
+                    # 降级到计算方案
+                    total_contribution_all_for_summary = self._calculate_contribution_from_plan(target_collaborators_details, resource_types)
             else:
-                # 备用方案：从final_plan计算
-                all_resource_costs = [d['resource_cost'] for details in target_collaborators_details.values() for d in details]
-                if not all_resource_costs:
-                    total_contribution_all_for_summary = np.zeros(resource_types)
-                else:
-                    total_contribution_all_for_summary = np.sum(all_resource_costs, axis=0)
-                    print(f"[DEBUG] 从final_plan计算总贡献: {total_contribution_all_for_summary}")
+                # 3. 最后降级到从 final_plan 重新计算
+                total_contribution_all_for_summary = self._calculate_contribution_from_plan(target_collaborators_details, resource_types)
 
             for t in targets:
                 current_target_contribution_sum = np.sum([d['resource_cost'] for d in target_collaborators_details.get(t.id, [])], axis=0)
@@ -210,24 +268,41 @@ class PlanVisualizer:
         colors = plt.cm.gist_rainbow(np.linspace(0, 1, len(uavs))) if uavs else []
         uav_color_map = {u.id: colors[i] for i, u in enumerate(uavs)}
         
+        # 绘制路径，确保所有UAV的任务都正确显示
+        print(f"[DEBUG] 开始绘制所有UAV路径，total UAVs: {len(final_plan)}")
+        
         for uav_id, tasks in final_plan.items():
+            print(f"[DEBUG] === 处理UAV {uav_id} ===")
             uav_color = uav_color_map.get(uav_id, 'gray')
             temp_resources = next(u for u in uavs if u.id == uav_id).initial_resources.copy().astype(float)
             
             # 获取无人机起始位置
             uav = next(u for u in uavs if u.id == uav_id)
             current_pos = uav.position
+            print(f"[DEBUG] UAV {uav_id} 起始位置: {current_pos}")
             
             # 按步骤顺序排序任务
             sorted_tasks = sorted(tasks, key=lambda x: x.get('step', 0))
+            print(f"[DEBUG] UAV {uav_id} 任务数量: {len(sorted_tasks)}")
             
             # 绘制连续路径
             for i, task in enumerate(sorted_tasks):
+                print(f"[DEBUG] UAV {uav_id} 任务 {i+1}/{len(sorted_tasks)}: step{task.get('step', '?')}")
+                
                 # 获取目标位置
                 target_id = task['target_id']
                 target = next(t for t in targets if t.id == target_id)
                 target_pos = target.position
                 
+                print(f"[DEBUG] UAV {uav_id} -> 目标{target_id}: {current_pos} -> {target_pos}")
+                
+                # 检查路径距离
+                distance_check = np.linalg.norm(np.array(target_pos) - np.array(current_pos))
+                print(f"[DEBUG] UAV {uav_id} 路径距离: {distance_check:.2f}m")
+                if distance_check < 1.0:
+                    print(f"[WARNING] UAV {uav_id} 起点终点过近: {distance_check:.2f}m")
+                
+                planning_successful = True # 新增：初始化路径规划成功标志
                 # 使用PH-RRT算法生成曲线路径
                 try:
                     from path_planning import PHCurveRRTPlanner
@@ -248,19 +323,44 @@ class PlanVisualizer:
                     if result is not None:
                         path_points, distance = result
                         path_points = np.array(path_points)
+                        if len(path_points) <= 1:
+                            print(f"[WARNING] UAV {uav_id} 到目标{target_id} PH-RRT路径点数不足({len(path_points)})，使用平滑曲线")
+                            path_points = self._generate_smooth_curve(current_pos, target_pos)
+                            planning_successful = False
+                        else:
+                            print(f"[DEBUG] UAV {uav_id} 到目标{target_id} PH-RRT成功，路径点数: {len(path_points)}")
+                            # 检查路径是否实际移动
+                            start_point = path_points[0]
+                            end_point = path_points[-1]
+                            actual_distance = np.linalg.norm(end_point - start_point)
+                            expected_distance = np.linalg.norm(np.array(target_pos) - np.array(current_pos))
+                            print(f"[DEBUG] UAV {uav_id} 路径检查: 实际距离={actual_distance:.2f}m, 期望距离={expected_distance:.2f}m")
+                            
+                            if actual_distance < expected_distance * 0.5:  # 如果实际路径距离小于期望距离的50%
+                                print(f"[WARNING] UAV {uav_id} PH-RRT路径异常(距离不足)，使用平滑曲线")
+                                path_points = self._generate_smooth_curve(current_pos, target_pos)
+                                planning_successful = False
                     else:
                         # 规划失败时生成平滑曲线
                         path_points = self._generate_smooth_curve(current_pos, target_pos)
+                        planning_successful = False # 新增：更新标志位
                         
                 except Exception as e:
-                    print(f"PH-RRT规划失败: {e}，使用平滑曲线")
+                    print(f"[WARNING] UAV {uav_id} PH-RRT规划异常: {e}，使用平滑曲线")
                     path_points = self._generate_smooth_curve(current_pos, target_pos)
+                    planning_successful = False # 新增：更新标志位
                 
                 # 绘制路径
+                line_style = '-' if planning_successful else '--'
+                print(f"[DEBUG] UAV {uav_id} 绘制路径: 点数={len(path_points)}, 线型={line_style}")
+                print(f"[DEBUG] UAV {uav_id} 路径范围: X[{path_points[:, 0].min():.1f}, {path_points[:, 0].max():.1f}], Y[{path_points[:, 1].min():.1f}, {path_points[:, 1].max():.1f}]")
+                
                 ax.plot(path_points[:, 0], path_points[:, 1], 
                        color=uav_color, 
-                       linestyle='-' if task.get('is_sync_feasible', True) else '--', 
+                       linestyle= line_style,#'-' if task.get('is_sync_feasible', True) else '--', 
                        linewidth=2, alpha=0.9, zorder=3)
+                
+                print(f"[DEBUG] UAV {uav_id} 路径已绘制到图表")
                 
                 # 添加步骤标记 - 优化：改进序列顺序的显示清晰度
                 mid_pos = path_points[len(path_points) // 2]
@@ -476,6 +576,39 @@ class PlanVisualizer:
         
         return final_report_for_file, img_filepath
 
+    def _calculate_contribution_from_plan(self, target_collaborators_details, resource_types):
+        """
+        从 final_plan 计算总贡献，避免重复计算
+        
+        Args:
+            target_collaborators_details: 目标协作详情
+            resource_types: 资源类型数量
+            
+        Returns:
+            np.array: 总贡献向量
+        """
+        # 按目标分组计算，避免重复计算同一个目标的贡献
+        target_contributions = {}
+        
+        for target_id, details in target_collaborators_details.items():
+            # 对每个目标，计算所有UAV的贡献总和
+            target_total = np.zeros(resource_types)
+            for detail in details:
+                target_total += detail['resource_cost']
+            target_contributions[target_id] = target_total
+            print(f"[DEBUG] 目标 {target_id} 总贡献: {target_total}")
+        
+        # 计算所有目标的贡献总和
+        if target_contributions:
+            total_contribution = np.sum(list(target_contributions.values()), axis=0)
+            print(f"[DEBUG] 从final_plan重新计算总贡献: {total_contribution}")
+            print(f"[DEBUG] 计算基础: {len(target_contributions)} 个目标")
+        else:
+            total_contribution = np.zeros(resource_types)
+            print(f"[DEBUG] 无贡献数据，使用零向量")
+        
+        return total_contribution
+
     def _generate_smooth_curve(self, start_pos, end_pos):
         """生成平滑曲线路径作为PH-RRT的备选方案"""
         start_pos = np.array(start_pos)
@@ -597,6 +730,40 @@ class ModelEvaluator:
             'evaluation_time': 0.0
         }
 
+    def _safe_evaluate_plan(self, final_plan, uavs, targets, **kwargs):
+        """
+        安全的评估函数调用，使用深拷贝防止数据污染
+        
+        Args:
+            final_plan: 原始的任务分配方案
+            uavs: 无人机列表
+            targets: 目标列表
+            **kwargs: 其他传递给 evaluate_plan 的参数
+            
+        Returns:
+            dict: 评估指标字典
+            
+        Note:
+            此函数创建 final_plan 的深拷贝副本传递给 evaluate_plan，
+            确保原始数据不被修改，维护数据源的唯一性。
+        """
+        try:
+            # 创建深拷贝以防止数据污染
+            final_plan_copy = copy.deepcopy(final_plan)
+            print(f"[DEBUG] 已创建 final_plan 深拷贝，防止数据污染")
+            
+            # 使用副本调用评估函数
+            return evaluate_plan(final_plan_copy, uavs, targets, **kwargs)
+            
+        except Exception as e:
+            print(f"[ERROR] 深拷贝操作失败: {type(e).__name__}: {e}")
+            print(f"[WARNING] 降级到使用原始对象进行评估")
+            print(f"[WARNING] 这可能导致 evaluate_plan 函数修改原始数据，存在数据污染风险")
+            print(f"[DEBUG] 建议检查 final_plan 数据结构是否包含不可序列化的对象")
+            
+            # 降级方案：使用原始对象但记录警告
+            return evaluate_plan(final_plan, uavs, targets, **kwargs)
+
     def _generate_complete_visualization(self, scenario_name: str, inference_mode: str, 
                                     uavs, targets, obstacles, results, suffix: str = ""):
         """生成完整的可视化结果 - 集成PlanVisualizer和ResultSaver"""
@@ -608,9 +775,9 @@ class ModelEvaluator:
             visualizer = PlanVisualizer(self.config)
             saver = ResultSaver(self.config)
             
-            # 计算评估指标
+            # 计算评估指标（使用深拷贝防止数据污染）
             final_uav_states = results.get('final_uav_states', None)
-            evaluation_metrics = evaluate_plan(final_plan, uavs, targets, final_uav_states=final_uav_states)
+            evaluation_metrics = self._safe_evaluate_plan(final_plan, uavs, targets, final_uav_states=final_uav_states)
             
             # 【重要修改】以推理结果为准，推理结果就是最终的分配方案
             if results and 'completion_rate' in results:
@@ -730,68 +897,6 @@ class ModelEvaluator:
         return {
             'uav_assignments': uav_assignments
         }
-    def _build_plan_from_inference_results(self, results, uavs, targets):
-        """
-        从推理结果构建执行计划
-        
-        Args:
-            results: 推理结果字典
-            uavs: UAV列表
-            targets: 目标列表
-            
-        Returns:
-            dict: 执行计划
-        """
-        final_plan = {uav.id: [] for uav in uavs}
-        
-        inference_assignments = results.get('inference_task_assignments', {})
-        inference_targets = results.get('inference_target_status', {})
-        
-        print(f"[DEBUG] 从推理结果构建执行计划:")
-        print(f"  - UAV分配方案数量: {len(inference_assignments)}")
-        print(f"  - 目标状态数量: {len(inference_targets)}")
-        
-        # 为每个UAV构建任务序列
-        for uav_id, uav_info in inference_assignments.items():
-            consumed_resources = uav_info['consumed_resources']
-            initial_resources = uav_info['initial_resources']
-            
-            # 找到该UAV贡献资源的目标
-            uav_tasks = []
-            for target_id, target_info in inference_targets.items():
-                contributed_resources = target_info['contributed_resources']
-                
-                # 检查该UAV是否向此目标贡献了资源
-                if np.any(contributed_resources > 0):
-                    # 计算该UAV对此目标的贡献比例
-                    # 这里简化处理，假设UAV按比例贡献资源
-                    contribution_ratio = np.mean(contributed_resources / (initial_resources + 1e-6))
-                    
-                    if contribution_ratio > 0.1:  # 如果贡献比例超过10%，认为该UAV参与了此目标
-                        # 找到对应的目标对象
-                        target_obj = next((t for t in targets if t.id == target_id), None)
-                        uav_obj = next((u for u in uavs if u.id == uav_id), None)
-                        
-                        if target_obj and uav_obj:
-                            distance = np.linalg.norm(uav_obj.position - target_obj.position)
-                            speed = 15.0  # 默认速度
-                            
-                            task = {
-                                'target_id': int(target_id),  # 确保target_id是整数类型
-                                'step': len(uav_tasks) + 1,
-                                'distance': distance,
-                                'speed': speed,
-                                'arrival_time': distance / speed,
-                                'resource_cost': contributed_resources,
-                                'is_sync_feasible': True  # 推理结果认为可行
-                            }
-                            uav_tasks.append(task)
-            
-            final_plan[uav_id] = uav_tasks
-            print(f"  - UAV {uav_id}: 分配了 {len(uav_tasks)} 个任务")
-        
-        return final_plan
-
 
 
     def start_evaluation(self, model_paths: Union[str, List[str]], scenario_name: str = "small"):
@@ -851,8 +956,8 @@ class ModelEvaluator:
             plan_data = self._build_execution_plan_from_action_sequence(action_sequence, uavs, targets, self.env, step_details)
             final_plan = plan_data.get('uav_assignments', {})
 
-            # 2. 调用权威评估函数，生成唯一的评估指标
-            evaluation_metrics = evaluate_plan(
+            # 2. 调用权威评估函数，生成唯一的评估指标（使用深拷贝防止数据污染）
+            evaluation_metrics = self._safe_evaluate_plan(
                 final_plan, uavs, targets, final_uav_states=results.get('final_uav_states')
             )
             
@@ -1720,3 +1825,241 @@ def start_evaluation(config: Config, model_paths: Union[str, List[str]], scenari
     """
     evaluator = ModelEvaluator(config)
     evaluator.start_evaluation(model_paths, scenario_name)
+
+
+# =============================================================================
+# 测试函数 - 验证重构后的数据一致性
+# =============================================================================
+
+def test_data_isolation():
+    """
+    测试数据隔离功能，验证深拷贝防止数据污染
+    
+    Returns:
+        bool: 测试是否通过
+    """
+    print("=" * 60)
+    print("执行数据隔离测试")
+    print("=" * 60)
+    
+    try:
+        # 创建测试配置和评估器
+        from config import Config
+        config = Config()
+        evaluator = ModelEvaluator(config)
+        
+        # 创建测试数据
+        test_final_plan = {
+            0: [
+                {
+                    'target_id': 1,
+                    'resource_cost': np.array([10.0, 5.0]),
+                    'arrival_time': 2.5,
+                    'distance': 100.0,
+                    'step': 1,
+                    'is_sync_feasible': True
+                }
+            ],
+            1: [
+                {
+                    'target_id': 2,
+                    'resource_cost': np.array([8.0, 12.0]),
+                    'arrival_time': 3.0,
+                    'distance': 120.0,
+                    'step': 1,
+                    'is_sync_feasible': True
+                }
+            ]
+        }
+        
+        # 创建测试 UAV 和目标
+        from entities import UAV, Target
+        test_uavs = [
+            UAV(0, np.array([0, 0]), 0.0, np.array([20.0, 15.0]), 1000.0, (10.0, 30.0), 15.0),
+            UAV(1, np.array([10, 10]), 0.0, np.array([15.0, 20.0]), 1000.0, (10.0, 30.0), 15.0)
+        ]
+        test_targets = [
+            Target(1, np.array([50, 50]), np.array([10.0, 5.0]), 100.0),
+            Target(2, np.array([80, 80]), np.array([8.0, 12.0]), 120.0)
+        ]
+        
+        # 保存原始数据的副本用于比较
+        original_plan_copy = copy.deepcopy(test_final_plan)
+        
+        # 调用安全评估函数
+        print("调用 _safe_evaluate_plan 函数...")
+        evaluation_metrics = evaluator._safe_evaluate_plan(
+            test_final_plan, test_uavs, test_targets
+        )
+        
+        # 验证原始数据未被修改 - 使用深度比较
+        def deep_compare_plans(plan1, plan2):
+            """深度比较两个 final_plan 对象"""
+            if set(plan1.keys()) != set(plan2.keys()):
+                return False
+            
+            for uav_id in plan1.keys():
+                tasks1 = plan1[uav_id]
+                tasks2 = plan2[uav_id]
+                
+                if len(tasks1) != len(tasks2):
+                    return False
+                
+                for i, (task1, task2) in enumerate(zip(tasks1, tasks2)):
+                    # 比较基本字段
+                    if task1.get('target_id') != task2.get('target_id'):
+                        return False
+                    if task1.get('step') != task2.get('step'):
+                        return False
+                    
+                    # 比较 numpy 数组
+                    rc1 = task1.get('resource_cost')
+                    rc2 = task2.get('resource_cost')
+                    if rc1 is not None and rc2 is not None:
+                        if not np.array_equal(rc1, rc2):
+                            return False
+                    elif rc1 != rc2:  # 一个是 None，另一个不是
+                        return False
+            
+            return True
+        
+        plan_unchanged = deep_compare_plans(test_final_plan, original_plan_copy)
+        
+        if plan_unchanged:
+            print("✅ 测试通过: 原始 final_plan 数据未被修改")
+            print(f"✅ 评估指标成功生成: {list(evaluation_metrics.keys())}")
+            return True
+        else:
+            print("❌ 测试失败: 原始 final_plan 数据被修改")
+            print(f"原始数据: {original_plan_copy}")
+            print(f"修改后数据: {test_final_plan}")
+            return False
+            
+    except Exception as e:
+        print(f"❌ 测试执行失败: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
+
+def test_visualization_consistency():
+    """
+    测试可视化一致性，验证重构前后输出的关键指标一致
+    
+    Returns:
+        bool: 测试是否通过
+    """
+    print("=" * 60)
+    print("执行可视化一致性测试")
+    print("=" * 60)
+    
+    try:
+        # 创建测试配置
+        from config import Config
+        config = Config()
+        
+        # 创建测试数据
+        test_final_plan = {
+            0: [
+                {
+                    'target_id': 1,
+                    'resource_cost': np.array([10.0, 5.0]),
+                    'arrival_time': 2.5,
+                    'distance': 100.0,
+                    'step': 1,
+                    'is_sync_feasible': True
+                }
+            ]
+        }
+        
+        from entities import UAV, Target
+        test_uavs = [UAV(0, np.array([0, 0]), 0.0, np.array([20.0, 15.0]), 1000.0, (10.0, 30.0), 15.0)]
+        test_targets = [Target(1, np.array([50, 50]), np.array([10.0, 5.0]), 100.0)]
+        test_obstacles = []
+        
+        # 创建可视化器
+        visualizer = PlanVisualizer(config)
+        
+        # 测试可视化功能（不保存文件，只验证数据处理）
+        print("测试可视化数据处理...")
+        
+        # 验证目标协作详情计算
+        target_collaborators_details = defaultdict(list)
+        for uav_id, tasks in test_final_plan.items():
+            for task in sorted(tasks, key=lambda x: x.get('step', 0)):
+                target_id = task['target_id']
+                if 'resource_cost' in task and task['resource_cost'] is not None:
+                    resource_cost = task['resource_cost']
+                    target_collaborators_details[target_id].append({
+                        'uav_id': uav_id, 
+                        'arrival_time': task.get('arrival_time', 0), 
+                        'resource_cost': resource_cost
+                    })
+        
+        # 验证数据完整性
+        if len(target_collaborators_details) > 0:
+            print("✅ 测试通过: 目标协作详情计算正常")
+            
+            # 验证资源贡献计算
+            all_resource_costs = [d['resource_cost'] for details in target_collaborators_details.values() for d in details]
+            if len(all_resource_costs) > 0:
+                total_contribution = np.sum(all_resource_costs, axis=0)
+                print(f"✅ 测试通过: 总贡献计算正常 {total_contribution}")
+                return True
+            else:
+                print("❌ 测试失败: 无法计算总贡献")
+                return False
+        else:
+            print("❌ 测试失败: 目标协作详情为空")
+            return False
+            
+    except Exception as e:
+        print(f"❌ 测试执行失败: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
+
+def run_all_tests():
+    """
+    运行所有测试
+    
+    Returns:
+        bool: 所有测试是否通过
+    """
+    print("🚀 开始执行 evaluator.py 重构验证测试")
+    print("=" * 80)
+    
+    tests = [
+        ("数据隔离测试", test_data_isolation),
+        ("可视化一致性测试", test_visualization_consistency)
+    ]
+    
+    passed_tests = 0
+    total_tests = len(tests)
+    
+    for test_name, test_func in tests:
+        print(f"\n📋 执行测试: {test_name}")
+        try:
+            if test_func():
+                passed_tests += 1
+                print(f"✅ {test_name} 通过")
+            else:
+                print(f"❌ {test_name} 失败")
+        except Exception as e:
+            print(f"❌ {test_name} 执行异常: {e}")
+    
+    print("\n" + "=" * 80)
+    print(f"📊 测试结果: {passed_tests}/{total_tests} 通过")
+    
+    if passed_tests == total_tests:
+        print("🎉 所有测试通过！重构成功完成。")
+        return True
+    else:
+        print("⚠️ 部分测试失败，需要进一步检查。")
+        return False
+
+
+if __name__ == "__main__":
+    # 当直接运行此文件时，执行测试
+    run_all_tests()

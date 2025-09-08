@@ -136,7 +136,7 @@ class Config:
         
         # ----- 分级日志输出控制配置 -----
         # 日志输出级别控制 ('minimal', 'simple', 'detailed', 'debug')
-        self.LOG_LEVEL = 'detailed'#'simple'#                       # 默认简洁模式
+        self.LOG_LEVEL ='simple'#  'minimal'#'detailed'#                      # 默认简洁模式
         self.LOG_EPISODE_DETAIL = False                # 是否输出轮次内步的详细信息
         self.LOG_REWARD_DETAIL = False                  # 是否输出奖励分解详细信息
         
@@ -169,7 +169,7 @@ class Config:
         # ----- 训练轮次推理结果记录配置 -----
         # 每轮次推理结果记录控制
         self.SAVE_EPISODE_INFERENCE_RESULTS = True      # 是否保存每轮次的推理结果
-        self.EPISODE_INFERENCE_LOG_FORMAT = 'detailed'  # 轮次推理日志记录格式: 'simple', 'detailed', 'both'
+        self.EPISODE_INFERENCE_LOG_FORMAT ='simple'# 'detailed'  # 轮次推理日志记录格式: 'simple', 'detailed', 'both'
         self.EPISODE_INFERENCE_INCLUDE_TASK_ALLOCATION = True  # 是否包含详细的任务分配方案
         self.EPISODE_INFERENCE_INCLUDE_PERFORMANCE_METRICS = True  # 是否包含性能指标
         self.EPISODE_INFERENCE_INCLUDE_COMPLETE_VISUALIZATION = True  # 是否包含完整可视化结果
@@ -229,8 +229,8 @@ class Config:
 
         # ----- 环境维度参数 -----
         # 环境规模限制（用于张量维度统一）：
-        self.MAX_UAVS = 25                  # 支持的最大UAV数量，超出会截断**
-        self.MAX_TARGETS = 15               # 支持的最大目标数量，超出会截断**
+        self.MAX_UAVS = 50 #25                  # 支持的最大UAV数量，超出会截断**
+        self.MAX_TARGETS = 25 #15               # 支持的最大目标数量，超出会截断**
         self.MAP_SIZE = 1000.0              # 地图边长(米)，用于坐标归一化
         self.MAX_INTERACTION_RANGE = 2000.0 # UAV最大交互距离(米)，超出视为无效
         self.RESOURCE_DIM = 2                 # 资源维度，例如：货物和燃料
@@ -280,8 +280,8 @@ class Config:
         # ----- 渐进式自适应课程学习 (Granular Adaptive Curriculum) -----
         # 精细化课程训练参数
         self.CURRICULUM_USE_GRANULAR_PROGRESSION = True  # True: 启用渐进式课程, False: 使用原有模板
-        self.GRANULAR_CURRICULUM_LEVELS = 15  #3#              # 课程的总等级数量
-        self.CURRICULUM_MASTERY_THRESHOLD = 0.85 #0.50 #        # 课程掌握度阈值，达到此完成率视为掌握
+        self.GRANULAR_CURRICULUM_LEVELS = 30 #15  #3#              # 课程的总等级数量
+        self.CURRICULUM_MASTERY_THRESHOLD = 0.9 # 0.85 #0.50 #        # 课程掌握度阈值，达到此完成率视为掌握
         self.CURRICULUM_PERFORMANCE_WINDOW = 20  #5 #          # 性能评估滑动窗口大小
         self.CURRICULUM_MAX_EPISODES_PER_LEVEL = 500 # 20#      # 单个难度等级最大训练轮次
         self.CURRICULUM_MIN_EPISODES_PER_LEVEL = 30 # 3#       # 单个难度等级最小训练轮次

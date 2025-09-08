@@ -62,7 +62,7 @@ def parse_arguments():
   训练模式:
     python main.py --mode train --scenario easy | tee training_log_easy.txt # 同时在控制台显示并保存到文件
     python main.py --mode train --scenario easy --episodes 1000          # ZeroShotGNN默认图模式，其他网络默认动态模式
-    python main.py --mode train --use-curriculum          # 课程学习训练
+    python main.py --mode train --use-curriculum --episodes 8000          # 课程学习训练，最大支持50无人机
     python main.py --mode train --network ZeroShotGNN --scenario medium  # 指定ZeroShotGNN使用图模式
     python main.py --mode train --network DeepFCN --scenario small       # 指定DeepFCN使用动态模式
     python main.py --mode train --use-phrrt-training --episodes 500      # 训练时使用高精度PH-RRT算法
