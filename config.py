@@ -124,7 +124,7 @@ class Config:
         # - True: 使用高精度PH-RRT算法，计算准确但耗时
         # - False: 使用快速近似算法，计算快速但精度较低
         self.USE_PHRRT_DURING_TRAINING = False          # 训练时是否使用高精度PH-RRT
-        self.USE_PHRRT_DURING_PLANNING = True          # 规划时是否使用高精度PH-RRT
+        self.USE_PHRRT_DURING_PLANNING = False          # 规划时是否使用高精度PH-RRT
         
         # 距离计算服务配置
         self.ENABLE_DISTANCE_CACHE = True              # 启用距离计算缓存

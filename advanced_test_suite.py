@@ -110,7 +110,9 @@ class ModelTestSuiteRunner:
         self.model_paths = model_paths
         self.config = config
         self.output_dir = output_dir
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        
+        # 【优化】智能设备选择：优先GPU，回退CPU
+        self.device = self._select_optimal_device()
         
         print(f"测试结果将保存至: {self.output_dir}")
         os.makedirs(self.output_dir, exist_ok=True)
@@ -124,13 +126,45 @@ class ModelTestSuiteRunner:
         self.csv_path = os.path.join(self.output_dir, f"evaluation_summary_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv")
         self._init_csv()
 
+    def _select_optimal_device(self):
+        """
+        智能选择最优推理设备
+        
+        Returns:
+            torch.device: 选择的设备
+        """
+        if torch.cuda.is_available():
+            # 检查GPU信息
+            gpu_count = torch.cuda.device_count()
+            current_device = torch.cuda.current_device()
+            gpu_name = torch.cuda.get_device_name(current_device)
+            gpu_memory = torch.cuda.get_device_properties(current_device).total_memory / 1024**3  # GB
+            
+            print(f"🚀 检测到GPU设备: {gpu_name}")
+            print(f"   📊 GPU内存: {gpu_memory:.1f}GB")
+            print(f"   🔢 GPU数量: {gpu_count}")
+            print(f"   ✅ 选择GPU进行推理加速")
+            
+            # 清空GPU缓存以确保最佳性能
+            torch.cuda.empty_cache()
+            
+            return torch.device("cuda")
+        else:
+            print(f"⚠️  未检测到可用GPU")
+            print(f"   🖥️  使用CPU进行推理")
+            print(f"   💡 建议: 使用GPU可显著提升推理速度")
+            
+            return torch.device("cpu")
+
     def _load_models(self) -> dict:
-        """一次性加载所有指定的模型"""
+        """一次性加载所有指定的模型并进行脚本化优化"""
         loaded_networks = {}
+        scripted_networks = {}
+        
         for model_path in self.model_paths:
-            print(f"正在从 {model_path} 加载模型...")
+            print(f"🔄 正在从 {model_path} 加载模型...")
             if not os.path.exists(model_path):
-                print(f"警告: 模型文件未找到，跳过: {model_path}")
+                print(f"⚠️  警告: 模型文件未找到，跳过: {model_path}")
                 continue
             
             i_dim = 64
@@ -142,24 +176,136 @@ class ModelTestSuiteRunner:
             ).to(self.device)
             
             try:
+                # 加载模型权重
                 try:
-                    # 优先尝试使用 weights_only=False，以兼容包含非Tensor数据类型的模型文件
                     model_data = torch.load(model_path, map_location=self.device, weights_only=False)
                 except TypeError:
-                    # 如果PyTorch版本过旧不支持weights_only参数，则回退到原始加载方式
-                    print("当前PyTorch版本不支持weights_only参数，使用默认方式加载。")
+                    print("⚠️  当前PyTorch版本不支持weights_only参数，使用默认方式加载。")
                     model_data = torch.load(model_path, map_location=self.device)
+                
                 state_dict = model_data['model_state_dict'] if isinstance(model_data, dict) and 'model_state_dict' in model_data else model_data
                 network.load_state_dict(state_dict)
                 network.eval()
-                loaded_networks[model_path] = network
-                print(f"模型 {os.path.basename(model_path)} 加载成功。")
+                
+                print(f"✅ 模型 {os.path.basename(model_path)} 权重加载成功")
+                
+                # 【性能优化】应用推理优化技术
+                print(f"🚀 开始推理性能优化...")
+                optimized_network = self._optimize_model_for_inference(network, model_path)
+                
+                loaded_networks[model_path] = network  # 保留原始模型
+                scripted_networks[model_path] = optimized_network  # 优化后的模型用于推理
+                print(f"🎯 模型 {os.path.basename(model_path)} 推理优化完成")
+                    
             except Exception as e:
-                print(f"加载模型 {os.path.basename(model_path)} 失败: {e}")
+                print(f"❌ 加载模型 {os.path.basename(model_path)} 失败: {e}")
         
         if not loaded_networks:
             raise RuntimeError("未能成功加载任何模型，测试中止。")
+            
+        # 保存脚本化模型供推理使用
+        self.scripted_networks = scripted_networks
         return loaded_networks
+
+    def _script_model(self, network, model_path: str):
+        """
+        对模型进行脚本化优化，提升推理性能
+        
+        Args:
+            network: 原始PyTorch模型
+            model_path: 模型文件路径
+            
+        Returns:
+            torch.jit.ScriptModule: 脚本化模型，失败时返回None
+        """
+        # 【简化版本】由于当前网络架构包含复杂的动态形状处理和try-except块，
+        # 暂时跳过脚本化，直接返回None使用原始模型
+        # 这样可以确保功能正常，后续可以专门优化网络架构以支持脚本化
+        
+        print(f"   ⚠️  当前网络架构包含动态形状处理，暂时跳过脚本化优化")
+        print(f"   💡 建议：后续可创建脚本化兼容的网络版本以获得性能提升")
+        
+        return None
+
+    def _optimize_model_for_inference(self, network, model_path: str):
+        """
+        应用推理性能优化技术
+        
+        Args:
+            network: 原始PyTorch模型
+            model_path: 模型文件路径
+            
+        Returns:
+            优化后的模型
+        """
+        opt_start_time = time.time()
+        
+        # 【优化1】确保模型处于评估模式
+        network.eval()
+        
+        # 【优化2】禁用梯度计算（如果还没有禁用）
+        for param in network.parameters():
+            param.requires_grad = False
+        
+        # 【优化3】模型预热 - 进行几次前向传播以优化内存布局
+        print(f"   🔥 模型预热中...")
+        try:
+            with torch.no_grad():
+                if self.config.NETWORK_TYPE == "TransformerGNN":
+                    sample_input = self._create_sample_graph_input()
+                else:
+                    sample_input = self._create_sample_flat_input()
+                
+                # 进行3次预热推理
+                for _ in range(3):
+                    _ = network(sample_input)
+            print(f"   ✅ 模型预热成功")
+        except Exception as e:
+            print(f"   ⚠️  模型预热失败: {e}")
+            print(f"   💡 跳过预热，直接使用模型")
+        
+        # 【优化4】如果使用CUDA，同步GPU
+        if self.device.type == 'cuda':
+            torch.cuda.synchronize()
+        
+        opt_time = time.time() - opt_start_time
+        print(f"   ✅ 推理优化完成，耗时: {opt_time:.3f}s")
+        print(f"   📈 优化项目: 评估模式 + 梯度禁用 + 模型预热 + GPU同步")
+        
+        return network
+
+    def _create_sample_graph_input(self):
+        """为TransformerGNN创建示例图结构输入"""
+        max_uavs = self.config.MAX_UAVS
+        max_targets = self.config.MAX_TARGETS
+        
+        # 创建图结构输入，添加batch维度
+        sample_input = {
+            "uav_features": torch.randn(1, max_uavs, 12, device=self.device, dtype=torch.float32),
+            "target_features": torch.randn(1, max_targets, 8, device=self.device, dtype=torch.float32),
+            "relative_positions": torch.randn(1, max_uavs, max_targets, 2, device=self.device, dtype=torch.float32),
+            "distances": torch.randn(1, max_uavs, max_targets, device=self.device, dtype=torch.float32),
+            "masks": {
+                "uav_mask": torch.ones(1, max_uavs, device=self.device, dtype=torch.int32),
+                "target_mask": torch.ones(1, max_targets, device=self.device, dtype=torch.int32)
+            }
+        }
+        return sample_input
+
+    def _create_sample_flat_input(self):
+        """为FCN创建示例扁平向量输入"""
+        # 计算扁平输入维度
+        n_targets = self.config.MAX_TARGETS
+        n_uavs = self.config.MAX_UAVS
+        
+        target_dim = 7 * n_targets
+        uav_dim = 8 * n_uavs
+        collaboration_dim = n_targets * n_uavs
+        global_dim = 10
+        
+        total_dim = target_dim + uav_dim + collaboration_dim + global_dim
+        
+        return torch.randn(total_dim, device=self.device, dtype=torch.float32)
 
     def _init_csv(self):
         """初始化CSV文件并写入表头"""
@@ -169,7 +315,8 @@ class ModelTestSuiteRunner:
             'total_reward_score', 'completion_rate', 'satisfied_targets_rate',
             'resource_utilization_rate', 'load_balance_score', 'sync_feasibility_rate',
             'total_distance', 'resource_penalty', 'is_deadlocked', 'deadlocked_uav_count',
-            'inference_time_s', 'scenario_txt_path', 'result_plot_path', 'graph_plot_path'
+            'inference_time_s', 'is_scripted_model', 'avg_path_length', 'active_uav_ratio',
+            'scenario_txt_path', 'result_plot_path', 'graph_plot_path'
         ]
         with open(self.csv_path, 'w', newline='', encoding='utf-8') as f:
             writer = csv.DictWriter(f, fieldnames=self.csv_fieldnames)
@@ -418,19 +565,42 @@ class ModelTestSuiteRunner:
             model_name = os.path.basename(model_path)
             print(f"🤖 执行单模型推理: {model_name}")
 
-            # 创建当前场景的环境
+            # 【修复数据一致性】创建环境时使用预设场景数据，避免重新生成
             print("🔄 创建推理环境...")
             env_creation_start = time.time()
+            
+            # 创建环境但不立即重置
             graph = DirectedGraph(uavs, targets, self.config.GRAPH_N_PHI, obstacles, self.config)
             env = UAVTaskEnv(uavs, targets, graph, obstacles, self.config, obs_mode="graph")
+            
+            # 【关键修复】使用预设场景数据进行重置，确保数据一致性
+            scenario_data = {
+                'uavs': uavs,
+                'targets': targets,
+                'obstacles': obstacles
+            }
+            
+            # 重置环境时传递预设场景数据
+            reset_options = {
+                'scenario_name': scenario_name, 
+                'silent_reset': True,
+                'scenario': scenario_data,  # 使用预设场景数据
+                'force_reset': True  # 强制重置以确保使用预设数据
+            }
+            
+            reset_result = env.reset(options=reset_options)
             env_creation_time = time.time() - env_creation_start
             
-            # 记录环境创建后的实际实体数量
+            # 验证数据一致性
             actual_uav_count = len(env.uavs)
             actual_target_count = len(env.targets) 
             actual_obstacle_count = len(env.obstacles)
             
             print(f"🔄 环境创建完成，耗时: {env_creation_time:.3f}s")
+            
+            # 计算实际的资源概况
+            actual_total_supply = np.sum([uav.initial_resources for uav in env.uavs], axis=0)
+            actual_total_demand = np.sum([target.resources for target in env.targets], axis=0)
             
             if (actual_uav_count != len(uavs) or actual_target_count != len(targets) or 
                 actual_obstacle_count != len(obstacles)):
@@ -438,15 +608,37 @@ class ModelTestSuiteRunner:
                 print(f"   UAV: {len(uavs)} → {actual_uav_count}")
                 print(f"   Target: {len(targets)} → {actual_target_count}")
                 print(f"   Obstacle: {len(obstacles)} → {actual_obstacle_count}")
+                print(f"   原始资源: 供给{total_uav_resources} / 需求{total_target_demand}")
+                print(f"   实际资源: 供给{actual_total_supply} / 需求{actual_total_demand}")
+            else:
+                print(f"✅ 场景数据一致性验证通过")
+                print(f"   资源概况: 供给{actual_total_supply} / 需求{actual_total_demand}")
 
+            # 【性能优化推理】使用优化后的模型
+            optimized_network = self.scripted_networks.get(model_path, network)
+            is_optimized = optimized_network is not network
+            
+            print(f"🧠 开始神经网络推理 ({'优化模型' if is_optimized else '原始模型'})...")
+            
             # 【精确推理时间记录】开始
-            print("🧠 开始神经网络推理...")
             inference_start_time = time.time()
-            results = self.evaluator._run_inference(network, env, use_softmax_sampling=True, scenario_name=scenario_name)
+            
+            # 使用优化后的模型进行推理，并确保在no_grad上下文中
+            with torch.no_grad():
+                results = self.evaluator._run_inference(optimized_network, env, use_softmax_sampling=True, scenario_name=scenario_name)
+            
             pure_inference_time = time.time() - inference_start_time
             # 【精确推理时间记录】结束
             
-            print(f"✅ 神经网络推理完成，纯推理耗时: {pure_inference_time:.3f}s")
+            # 显示推理完成信息
+            if is_optimized:
+                print(f"⚡ 优化推理完成，耗时: {pure_inference_time:.3f}s")
+                if pure_inference_time < 1.0:
+                    print(f"🎯 推理性能: {1000 * pure_inference_time:.1f}ms (已达到毫秒级)")
+                else:
+                    print(f"📊 推理性能: {pure_inference_time:.3f}s")
+            else:
+                print(f"✅ 神经网络推理完成，纯推理耗时: {pure_inference_time:.3f}s")
             
             if not results:
                 print("❌ 推理失败，跳过此模型的本次测试。")
@@ -555,6 +747,9 @@ class ModelTestSuiteRunner:
             'scenario_name': scenario_name, 'num_uavs': len(eval_uavs), 'num_targets': len(eval_targets),
             'num_obstacles': len(eval_obstacles), 'resource_abundance': 1.2,
             'inference_time_s': round(pure_inference_time, 3),  # 使用纯推理时间，精确到毫秒
+            'is_scripted_model': is_optimized if 'is_optimized' in locals() else False,  # 是否使用优化模型
+            'avg_path_length': round(plan_analysis['avg_path_length_per_uav'], 1),  # 平均路径长度
+            'active_uav_ratio': round(plan_analysis['active_uav_count'] / len(eval_uavs), 3),  # 活跃UAV比例
             'scenario_txt_path': os.path.basename(scenario_txt_path),
             'result_plot_path': os.path.basename(final_img_path),
             'graph_plot_path': 'disabled',  # assignment_graph已屏蔽

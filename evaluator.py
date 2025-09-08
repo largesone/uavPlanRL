@@ -735,7 +735,7 @@ class ModelEvaluator:
     
     def __init__(self, config: Config):
         self.config = config
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.device = self._select_optimal_device()
         print(f"评估设备: {self.device}")
         
         # 评估统计
@@ -745,6 +745,30 @@ class ModelEvaluator:
             'average_efficiency': 0.0,
             'evaluation_time': 0.0
         }
+
+    def _select_optimal_device(self):
+        """
+        智能选择最优推理设备
+        
+        Returns:
+            torch.device: 选择的设备
+        """
+        if torch.cuda.is_available():
+            # 检查GPU信息
+            gpu_count = torch.cuda.device_count()
+            current_device = torch.cuda.current_device()
+            gpu_name = torch.cuda.get_device_name(current_device)
+            gpu_memory = torch.cuda.get_device_properties(current_device).total_memory / 1024**3  # GB
+            
+            print(f"🚀 GPU加速: {gpu_name} ({gpu_memory:.1f}GB)")
+            
+            # 清空GPU缓存以确保最佳性能
+            torch.cuda.empty_cache()
+            
+            return torch.device("cuda")
+        else:
+            print(f"⚠️  CPU推理模式")
+            return torch.device("cpu")
 
     def _safe_evaluate_plan(self, final_plan, uavs, targets, **kwargs):
         """
@@ -1310,6 +1334,124 @@ class ModelEvaluator:
             if 'completion_rate' in results:
                 print(f"[DEBUG] 使用集成推理结果中的完成率: {results['completion_rate']:.4f}")
         
+        return results
+    
+    def _run_inference_with_scripted_model(self, scripted_network, env, use_softmax_sampling=True, scenario_name='easy', scenario_data=None):
+        """
+        使用脚本化模型运行推理，优化性能
+        
+        Args:
+            scripted_network: 脚本化的神经网络模型 (torch.jit.ScriptModule)
+            env: 环境
+            use_softmax_sampling (bool): 是否使用Softmax采样
+            scenario_name (str): 场景名称，用于环境重置
+            scenario_data (dict): 预设场景数据，如果提供则使用预设数据而不重新生成
+            
+        Returns:
+            dict: 推理结果
+        """
+        # 环境重置
+        reset_options = {'scenario_name': scenario_name, 'silent_reset': True}
+        if scenario_data:
+            reset_options['scenario'] = scenario_data
+        reset_result = env.reset(options=reset_options)
+        
+        if isinstance(reset_result, tuple):
+            state = reset_result[0]
+        else:
+            state = reset_result
+            
+        total_reward = 0.0
+        step_count = 0
+        max_steps = 100
+        action_sequence = []        
+        step_details = []
+
+        with torch.no_grad():
+            while step_count < max_steps:
+                # 准备状态张量
+                if env.obs_mode == "flat":
+                    state_tensor = torch.FloatTensor(state).unsqueeze(0).to(self.device)
+                else:  # graph mode
+                    state_tensor = {}
+                    for key, value in state.items():
+                        if key == "masks":
+                            mask_tensor = {}
+                            for mask_key, mask_value in value.items():
+                                mask_tensor[mask_key] = torch.tensor(mask_value).unsqueeze(0).to(self.device)
+                            state_tensor[key] = mask_tensor
+                        else:
+                            state_tensor[key] = torch.FloatTensor(value).unsqueeze(0).to(self.device)
+
+                # 【性能优化】使用脚本化模型进行前向传播
+                q_values = scripted_network(state_tensor)
+                
+                # 获取动作掩码
+                action_mask = env.get_action_mask()
+                valid_actions = np.where(action_mask)[0]
+                
+                if len(valid_actions) == 0:
+                    break
+                
+                # 动作选择逻辑
+                if use_softmax_sampling:
+                    # 对有效动作应用softmax采样
+                    valid_q_values = q_values[0][valid_actions]
+                    action_probs = torch.softmax(valid_q_values, dim=-1)
+                    selected_idx = torch.multinomial(action_probs, 1).item()
+                    action = valid_actions[selected_idx]
+                else:
+                    # 选择Q值最高的有效动作
+                    valid_q_values = q_values[0][valid_actions]
+                    best_idx = torch.argmax(valid_q_values).item()
+                    action = valid_actions[best_idx]
+
+                # 执行动作
+                step_result = env.step(action)
+                if len(step_result) == 4:
+                    next_state, reward, done, info = step_result
+                    truncated = False
+                elif len(step_result) == 5:
+                    next_state, reward, done, truncated, info = step_result
+                else:
+                    raise ValueError(f"环境step返回了意外的元组长度: {len(step_result)}")
+
+                # 记录步骤详情
+                step_detail = {
+                    'step': step_count + 1,
+                    'action': action,
+                    'reward': reward,
+                    'done': done,
+                    'info': info.copy() if isinstance(info, dict) else {}
+                }
+                step_details.append(step_detail)
+                
+                action_sequence.append(action)
+                total_reward += reward
+                state = next_state
+                step_count += 1
+
+                if done or truncated:
+                    break
+
+        # 收集最终状态
+        final_uav_states = {}
+        for uav in env.uavs:
+            final_uav_states[uav.id] = {
+                'final_resources': uav.resources.copy(),
+                'initial_resources': uav.initial_resources.copy(),
+                'final_position': uav.current_position.copy()
+            }
+
+        results = {
+            'total_reward': total_reward,
+            'steps': step_count,
+            'action_sequence': action_sequence,
+            'step_details': step_details,
+            'final_uav_states': final_uav_states,
+            'scenario_name': scenario_name
+        }
+
         return results
     
     def _run_inference(self, network, env, use_softmax_sampling=True, scenario_name='easy', scenario_data=None):
