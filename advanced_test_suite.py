@@ -64,13 +64,16 @@ from evaluate import evaluate_plan
 
 def generate_test_scenario(num_uavs: int, num_targets: int, num_obstacles: int, config: Config):
     """
-    使用课程训练模式的场景生成函数，确保生成的场景数量与指定参数一致
+    【修复版本】直接生成指定数量的实体，不依赖环境重置
+    确保测试场景的数量与参数完全一致
     """
     # 导入课程训练模式的场景生成函数
     from scenarios import _generate_scenario
     
     # 计算合理的资源富裕度
     resource_abundance = 1.2  # 固定为1.2倍，确保测试的一致性
+    
+    print(f"🏗️  生成测试场景: UAV={num_uavs}, Target={num_targets}, Obstacle={num_obstacles}")
     
     # 调用课程训练模式的场景生成函数
     scenario_dict = _generate_scenario(
@@ -80,6 +83,18 @@ def generate_test_scenario(num_uavs: int, num_targets: int, num_obstacles: int, 
         obstacle_num=num_obstacles,
         resource_abundance=resource_abundance
     )
+    
+    # 验证生成的实体数量
+    actual_uavs = len(scenario_dict['uavs'])
+    actual_targets = len(scenario_dict['targets'])
+    actual_obstacles = len(scenario_dict['obstacles'])
+    
+    if (actual_uavs != num_uavs or actual_targets != num_targets or actual_obstacles != num_obstacles):
+        print(f"⚠️  场景生成数量不匹配:")
+        print(f"   期望: UAV={num_uavs}, Target={num_targets}, Obstacle={num_obstacles}")
+        print(f"   实际: UAV={actual_uavs}, Target={actual_targets}, Obstacle={actual_obstacles}")
+    else:
+        print(f"✅ 场景生成成功，数量匹配")
     
     return scenario_dict['uavs'], scenario_dict['targets'], scenario_dict['obstacles']
     obstacle_centers = np.random.uniform(map_size * 0.15, map_size * 0.85, size=(num_obstacles, 2))
@@ -160,6 +175,93 @@ class ModelTestSuiteRunner:
             writer = csv.DictWriter(f, fieldnames=self.csv_fieldnames)
             writer.writeheader()
         print(f"结果将记录在CSV文件: {self.csv_path}")
+
+    def _analyze_plan_details(self, final_plan: dict, uavs: list, targets: list, obstacles: list) -> dict:
+        """
+        分析方案的详细信息，包括路径长度、资源利用率等
+        
+        Returns:
+            dict: 包含详细分析结果的字典
+        """
+        analysis = {
+            'total_path_length': 0.0,
+            'avg_path_length_per_uav': 0.0,
+            'max_path_length': 0.0,
+            'min_path_length': float('inf'),
+            'active_uav_count': 0,
+            'idle_uav_count': 0,
+            'total_resource_consumption': np.zeros(2),
+            'resource_utilization_rate': 0.0,
+            'task_distribution': {},
+            'path_details': {}
+        }
+        
+        from distance_service import get_distance_service
+        distance_service = get_distance_service(self.config, obstacles)
+        
+        active_uavs = 0
+        total_path_lengths = []
+        
+        for uav in uavs:
+            uav_tasks = final_plan.get(uav.id, [])
+            if not uav_tasks:
+                analysis['idle_uav_count'] += 1
+                continue
+                
+            active_uavs += 1
+            current_pos = uav.position
+            uav_path_length = 0.0
+            uav_resource_consumption = np.zeros(2)
+            
+            # 按步骤排序任务
+            sorted_tasks = sorted(uav_tasks, key=lambda x: x.get('step', 0))
+            
+            for task in sorted_tasks:
+                # 找到目标位置
+                target = next((t for t in targets if t.id == task['target_id']), None)
+                if target:
+                    # 计算路径长度
+                    distance = distance_service.calculate_distance(
+                        current_pos.tolist(), target.position.tolist(), mode='planning'
+                    )
+                    uav_path_length += distance
+                    current_pos = target.position
+                    
+                    # 累计资源消耗
+                    resource_cost = task.get('resource_cost', np.zeros(2))
+                    uav_resource_consumption += resource_cost
+            
+            total_path_lengths.append(uav_path_length)
+            analysis['total_path_length'] += uav_path_length
+            analysis['total_resource_consumption'] += uav_resource_consumption
+            analysis['path_details'][uav.id] = {
+                'path_length': uav_path_length,
+                'task_count': len(sorted_tasks),
+                'resource_consumption': uav_resource_consumption.tolist()
+            }
+        
+        analysis['active_uav_count'] = active_uavs
+        
+        if total_path_lengths:
+            analysis['avg_path_length_per_uav'] = analysis['total_path_length'] / active_uavs
+            analysis['max_path_length'] = max(total_path_lengths)
+            analysis['min_path_length'] = min(total_path_lengths)
+        else:
+            analysis['min_path_length'] = 0.0
+            
+        # 计算资源利用率
+        total_initial_resources = np.sum([uav.initial_resources for uav in uavs], axis=0)
+        if np.sum(total_initial_resources) > 0:
+            analysis['resource_utilization_rate'] = np.sum(analysis['total_resource_consumption']) / np.sum(total_initial_resources)
+        
+        # 任务分布统计
+        for target in targets:
+            target_tasks = []
+            for uav_id, tasks in final_plan.items():
+                target_tasks.extend([t for t in tasks if t['target_id'] == target.id])
+            analysis['task_distribution'][target.id] = len(target_tasks)
+        
+        return analysis
 
     def _save_scenario_as_txt(self, scenario_data: dict, filepath: str):
         """保存场景数据为TXT格式，重新编排便于阅读"""
@@ -275,109 +377,205 @@ class ModelTestSuiteRunner:
 
     def _process_scenario(self, uavs: list, targets: list, obstacles: list, scenario_name: str):
         """对单个生成好的场景，使用所有已加载的模型进行测试和保存"""
+        print(f"\n{'='*80}")
+        print(f"🎯 开始处理场景: {scenario_name}")
+        print(f"📊 输入实体数量: UAV={len(uavs)}, Target={len(targets)}, Obstacle={len(obstacles)}")
+        
+        # 计算场景资源概况
+        total_uav_resources = np.sum([uav.initial_resources for uav in uavs], axis=0)
+        total_target_demand = np.sum([target.resources for target in targets], axis=0)
+        resource_abundance = total_uav_resources / (total_target_demand + 1e-6)
+        print(f"💰 资源概况: 供给{total_uav_resources} / 需求{total_target_demand} = 充裕度{resource_abundance}")
+        
         # 判断是否使用集成推理（当有多个模型时）
         if len(self.networks) > 1:
-            print(f"\n--- 执行集成推理 | 模型数量: {len(self.networks)} | 场景: {scenario_name} ---")
+            print(f"🔀 执行集成推理 | 模型数量: {len(self.networks)}")
             
-            # 执行集成推理
-            start_time = time.time()
+            # 【精确推理时间记录】开始
+            inference_start_time = time.time()
             results = self.evaluator._ensemble_inference(self.model_paths, uavs, targets, obstacles, scenario_name=scenario_name)
-            inference_time = time.time() - start_time
+            pure_inference_time = time.time() - inference_start_time
+            # 【精确推理时间记录】结束
             
             if not results:
-                print("集成推理失败，跳过此场景测试。")
+                print("❌ 集成推理失败，跳过此场景测试。")
                 return
                 
             # 使用第一个模型的名称作为集成推理的标识
             model_name = "ensemble_" + "_".join([os.path.basename(path)[:10] for path in self.model_paths[:3]])
             if len(self.model_paths) > 3:
                 model_name += f"_and_{len(self.model_paths)-3}_more"
+                
+            print(f"✅ 集成推理完成，纯推理耗时: {pure_inference_time:.3f}s")
+            
+            # 对于集成推理，需要获取环境信息
+            env = None  # 集成推理中环境信息需要从results中获取
+            
         else:
-            # 单模型推理逻辑保持不变
+            # 单模型推理逻辑
             model_path = list(self.networks.keys())[0]
             network = self.networks[model_path]
             model_name = os.path.basename(model_path)
-            print(f"\n--- 测试模型: {model_name} | 场景: {scenario_name} ---")
+            print(f"🤖 执行单模型推理: {model_name}")
 
             # 创建当前场景的环境
+            print("🔄 创建推理环境...")
+            env_creation_start = time.time()
             graph = DirectedGraph(uavs, targets, self.config.GRAPH_N_PHI, obstacles, self.config)
             env = UAVTaskEnv(uavs, targets, graph, obstacles, self.config, obs_mode="graph")
-
-            # 【修复】使用预设场景数据进行重置，避免重新生成实体
-            scenario_data = {
-                'uavs': uavs,
-                'targets': targets, 
-                'obstacles': obstacles
-            }
+            env_creation_time = time.time() - env_creation_start
             
-            # 执行推理
-            start_time = time.time()
-            results = self.evaluator._run_inference(network, env, use_softmax_sampling=True, scenario_name=scenario_name, scenario_data=scenario_data)
-            inference_time = time.time() - start_time
+            # 记录环境创建后的实际实体数量
+            actual_uav_count = len(env.uavs)
+            actual_target_count = len(env.targets) 
+            actual_obstacle_count = len(env.obstacles)
+            
+            print(f"🔄 环境创建完成，耗时: {env_creation_time:.3f}s")
+            
+            if (actual_uav_count != len(uavs) or actual_target_count != len(targets) or 
+                actual_obstacle_count != len(obstacles)):
+                print(f"⚠️  环境重置后实体数量发生变化:")
+                print(f"   UAV: {len(uavs)} → {actual_uav_count}")
+                print(f"   Target: {len(targets)} → {actual_target_count}")
+                print(f"   Obstacle: {len(obstacles)} → {actual_obstacle_count}")
+
+            # 【精确推理时间记录】开始
+            print("🧠 开始神经网络推理...")
+            inference_start_time = time.time()
+            results = self.evaluator._run_inference(network, env, use_softmax_sampling=True, scenario_name=scenario_name)
+            pure_inference_time = time.time() - inference_start_time
+            # 【精确推理时间记录】结束
+            
+            print(f"✅ 神经网络推理完成，纯推理耗时: {pure_inference_time:.3f}s")
             
             if not results:
-                print("推理失败，跳过此模型的本次测试。")
+                print("❌ 推理失败，跳过此模型的本次测试。")
                 return
 
-            # 评估和保存结果 - 使用正确的方法名
-            action_sequence = results.get('action_sequence', [])
-            step_details = results.get('step_details', [])
-            plan_data = self.evaluator._build_execution_plan_from_action_sequence(action_sequence, uavs, targets, env, step_details)
-            final_plan = plan_data.get('uav_assignments', {})
-            metrics = evaluate_plan(final_plan, uavs, targets, final_uav_states=results.get('final_uav_states'))
-            
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            file_suffix = f"{scenario_name}_{model_name[:20]}_{timestamp}"
+        # 【开始方案分析和评估】- 不计入推理时间
+        print("📊 开始方案分析和评估...")
+        analysis_start_time = time.time()
+        
+        # 使用环境中的实际实体进行评估
+        eval_uavs = env.uavs if env else uavs
+        eval_targets = env.targets if env else targets
+        eval_obstacles = env.obstacles if env else obstacles
+        
+        # 评估和保存结果
+        action_sequence = results.get('action_sequence', [])
+        step_details = results.get('step_details', [])
+        plan_data = self.evaluator._build_execution_plan_from_action_sequence(action_sequence, eval_uavs, eval_targets, env, step_details)
+        final_plan = plan_data.get('uav_assignments', {})
+        metrics = evaluate_plan(final_plan, eval_uavs, eval_targets, final_uav_states=results.get('final_uav_states'))
+        
+        # 【增强方案信息】计算详细的路径和资源信息
+        plan_analysis = self._analyze_plan_details(final_plan, eval_uavs, eval_targets, eval_obstacles)
+        
+        analysis_time = time.time() - analysis_start_time
+        print(f"📊 方案分析完成，耗时: {analysis_time:.3f}s")
+        
+        # 【输出详细方案信息】
+        print(f"\n📋 方案详细信息:")
+        print(f"   🛣️  总路径长度: {plan_analysis['total_path_length']:.1f}m")
+        print(f"   📏 平均路径长度: {plan_analysis['avg_path_length_per_uav']:.1f}m/UAV")
+        print(f"   📈 最长路径: {plan_analysis['max_path_length']:.1f}m")
+        print(f"   📉 最短路径: {plan_analysis['min_path_length']:.1f}m")
+        print(f"   🚁 活跃UAV: {plan_analysis['active_uav_count']}/{len(eval_uavs)}")
+        print(f"   😴 空闲UAV: {plan_analysis['idle_uav_count']}/{len(eval_uavs)}")
+        print(f"   ⛽ 资源利用率: {plan_analysis['resource_utilization_rate']:.1%}")
+        print(f"   🎯 完成率: {metrics.get('completion_rate', 0):.1%}")
+        
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        file_suffix = f"{scenario_name}_{model_name[:20]}_{timestamp}"
 
-            # 保存标准可视化图
-            report_content, img_path = self.visualizer.save(
-                final_plan, uavs, targets, obstacles, scenario_name=f"Test_{scenario_name}",
-                training_time=0, plan_generation_time=inference_time,
-                evaluation_metrics=metrics, suffix=f"_{model_name[:20]}_{timestamp}"
-            )
-            final_img_path = os.path.join(self.output_dir, os.path.basename(img_path))
-            if os.path.exists(img_path): os.rename(img_path, final_img_path)
+        # 【开始文件保存】- 不计入推理时间
+        print("💾 开始保存结果文件...")
+        file_save_start = time.time()
+        
+        # 保存标准可视化图
+        report_content, img_path = self.visualizer.save(
+            final_plan, eval_uavs, eval_targets, eval_obstacles, scenario_name=f"Test_{scenario_name}",
+            training_time=0, plan_generation_time=pure_inference_time,  # 使用纯推理时间
+            evaluation_metrics=metrics, suffix=f"_{model_name[:20]}_{timestamp}"
+        )
+        final_img_path = os.path.join(self.output_dir, os.path.basename(img_path))
+        if os.path.exists(img_path): os.rename(img_path, final_img_path)
 
             # 屏蔽assignment_graph图片生成
             # graph_plot_path = os.path.join(self.output_dir, f"assignment_graph_{file_suffix}.jpg")
             # graph_title = f'任务分配关系图\nModel: {model_name[:30]}...\nScenario: {scenario_name}'
             # self._plot_assignment_graph(final_plan, uavs, targets, graph_plot_path, graph_title)
 
-            # 【修复】使用推理后环境中的实际实体数据，确保数据一致性
-            actual_uavs = env.uavs if 'env' in locals() else uavs
-            actual_targets = env.targets if 'env' in locals() else targets
-            actual_obstacles = env.obstacles if 'env' in locals() else obstacles
-            
-            # 保存TXT格式的场景和结果报告
-            scenario_txt_path = os.path.join(self.output_dir, f"scenario_report_{file_suffix}.txt")
-            scenario_data = {
-                'episode': 'Test', 'scenario_name': scenario_name, 'timestamp': timestamp,
-                'uavs': actual_uavs, 'targets': actual_targets, 'obstacles': actual_obstacles,
-                'uav_count': len(actual_uavs), 'target_count': len(actual_targets), 'obstacle_count': len(actual_obstacles),
-                'config_info': {'obs_mode': 'graph'}, 'inference_report': report_content
-            }
-            self._save_scenario_as_txt(scenario_data, scenario_txt_path)
-            
-            # 将结果追加到CSV文件
-            csv_row = {
-                'timestamp': timestamp, 'model_name': model_name, 
-                'inference_mode': 'ensemble_inference' if len(self.networks) > 1 else 'single_model_test',
-                'scenario_name': scenario_name, 'num_uavs': len(actual_uavs), 'num_targets': len(actual_targets),
-                'num_obstacles': len(actual_obstacles), 'resource_abundance': 1.2,
-                'inference_time_s': round(inference_time, 2),
-                'scenario_txt_path': os.path.basename(scenario_txt_path),
-                'result_plot_path': os.path.basename(final_img_path),
-                'graph_plot_path': 'disabled',  # assignment_graph已屏蔽
-                **{k: v for k, v in metrics.items() if k in self.csv_fieldnames}
-            }
-            with open(self.csv_path, 'a', newline='', encoding='utf-8') as f:
-                writer = csv.DictWriter(f, fieldnames=self.csv_fieldnames)
-                writer.writerow(csv_row)
+        # 保存TXT格式的场景和结果报告，包含详细的方案分析
+        scenario_txt_path = os.path.join(self.output_dir, f"scenario_report_{file_suffix}.txt")
+        
+        # 构建增强的报告内容，包含方案分析
+        enhanced_report = report_content + f"""
 
-            if len(self.networks) > 1:
-                print(f"集成推理 ({len(self.networks)}个模型) 在场景 {scenario_name} 的测试完成。")
-            else:
-                print(f"模型 {model_name} 在场景 {scenario_name} 的测试完成。")
+方案详细分析:
+{'='*50}
+路径信息:
+  - 总路径长度: {plan_analysis['total_path_length']:.1f}m
+  - 平均路径长度: {plan_analysis['avg_path_length_per_uav']:.1f}m/UAV
+  - 最长路径: {plan_analysis['max_path_length']:.1f}m
+  - 最短路径: {plan_analysis['min_path_length']:.1f}m
+
+资源利用:
+  - 总资源消耗: {plan_analysis['total_resource_consumption']}
+  - 资源利用率: {plan_analysis['resource_utilization_rate']:.1%}
+  - 活跃UAV数量: {plan_analysis['active_uav_count']}/{len(eval_uavs)}
+  - 空闲UAV数量: {plan_analysis['idle_uav_count']}/{len(eval_uavs)}
+
+性能指标:
+  - 纯推理时间: {pure_inference_time:.3f}s
+  - 方案分析时间: {analysis_time:.3f}s
+  - 完成率: {metrics.get('completion_rate', 0):.1%}
+  - 资源利用率: {metrics.get('resource_utilization_rate', 0):.1%}
+
+任务分布:
+{chr(10).join([f"  - 目标{tid}: {count}个任务" for tid, count in plan_analysis['task_distribution'].items()])}
+"""
+        
+        scenario_data = {
+            'episode': 'Test', 'scenario_name': scenario_name, 'timestamp': timestamp,
+            'uavs': eval_uavs, 'targets': eval_targets, 'obstacles': eval_obstacles,
+            'uav_count': len(eval_uavs), 'target_count': len(eval_targets), 'obstacle_count': len(eval_obstacles),
+            'config_info': {'obs_mode': 'graph'}, 'inference_report': enhanced_report,
+            'plan_analysis': plan_analysis  # 添加详细分析数据
+        }
+        self._save_scenario_as_txt(scenario_data, scenario_txt_path)
+        
+        file_save_time = time.time() - file_save_start
+        print(f"💾 文件保存完成，耗时: {file_save_time:.3f}s")
+        
+        # 将结果追加到CSV文件，包含增强的信息
+        csv_row = {
+            'timestamp': timestamp, 'model_name': model_name, 
+            'inference_mode': 'ensemble_inference' if len(self.networks) > 1 else 'single_model_test',
+            'scenario_name': scenario_name, 'num_uavs': len(eval_uavs), 'num_targets': len(eval_targets),
+            'num_obstacles': len(eval_obstacles), 'resource_abundance': 1.2,
+            'inference_time_s': round(pure_inference_time, 3),  # 使用纯推理时间，精确到毫秒
+            'scenario_txt_path': os.path.basename(scenario_txt_path),
+            'result_plot_path': os.path.basename(final_img_path),
+            'graph_plot_path': 'disabled',  # assignment_graph已屏蔽
+            'total_distance': round(plan_analysis['total_path_length'], 1),  # 添加总路径长度
+            **{k: v for k, v in metrics.items() if k in self.csv_fieldnames}
+        }
+        with open(self.csv_path, 'a', newline='', encoding='utf-8') as f:
+            writer = csv.DictWriter(f, fieldnames=self.csv_fieldnames)
+            writer.writerow(csv_row)
+
+        # 【输出最终总结】
+        total_time = time.time() - (inference_start_time - pure_inference_time)  # 从开始到现在的总时间
+        print(f"\n🎉 场景 {scenario_name} 处理完成!")
+        print(f"   🤖 模型: {model_name}")
+        print(f"   ⏱️  纯推理时间: {pure_inference_time:.3f}s")
+        print(f"   📊 方案分析时间: {analysis_time:.3f}s") 
+        print(f"   💾 文件保存时间: {file_save_time:.3f}s")
+        print(f"   🕐 总处理时间: {total_time:.3f}s")
+        print(f"   🎯 任务完成率: {metrics.get('completion_rate', 0):.1%}")
+        print(f"   🛣️  总路径长度: {plan_analysis['total_path_length']:.1f}m")
+        print(f"{'='*80}")
 
     def run_suite(self, test_mode, num_random_scenarios, uav_range, target_range, step):
         """根据选择的模式，运行相应的测试套件"""
@@ -407,11 +605,16 @@ class ModelTestSuiteRunner:
     def run_random_tests(self, num_scenarios: int):
         """执行指定数量的随机场景测试"""
         print("\n" + "="*60 + f"\n启动随机测试模式 (数量: {num_scenarios})\n" + "="*60)
+        
+        # 【修复】使用合理的范围生成随机场景，避免超出模板限制
         for i in range(num_scenarios):
-            num_uavs = np.random.randint(2, self.config.MAX_UAVS + 1)
-            num_targets = np.random.randint(2, self.config.MAX_TARGETS + 1)
+            # 使用更合理的范围，确保不会超出模板限制
+            num_uavs = np.random.randint(3, min(25, self.config.MAX_UAVS) + 1)  # 3-25
+            num_targets = np.random.randint(2, min(15, self.config.MAX_TARGETS) + 1)  # 2-15
             scenario_name = f"random{i+1}_{num_uavs}uav_{num_targets}tgt"
-            num_obstacles = (num_uavs + num_targets) // 2
+            num_obstacles = max(5, (num_uavs + num_targets) // 3)  # 确保有足够的障碍物
+            
+            print(f"🎲 生成随机场景 {i+1}/{num_scenarios}: {scenario_name}")
             uavs, targets, obstacles = generate_test_scenario(num_uavs, num_targets, num_obstacles, self.config)
             self._process_scenario(uavs, targets, obstacles, scenario_name)
 
