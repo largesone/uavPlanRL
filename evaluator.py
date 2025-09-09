@@ -18,6 +18,48 @@ from scenarios import get_balanced_scenario, get_small_scenario, get_complex_sce
 from environment import UAVTaskEnv, DirectedGraph
 from networks import create_network
 from config import Config
+
+def log_print(level: str, message: str, config=None):
+    """
+    统一的日志输出控制函数
+    
+    Args:
+        level: 日志级别 ('debug', 'info', 'warning', 'error')
+        message: 日志消息
+        config: 配置对象，用于检查LOG_LEVEL
+    """
+    if config is None:
+        print(message)
+        return
+    
+    # 获取日志级别
+    log_level = getattr(config, 'LOG_LEVEL', 'simple').lower()
+    enable_debug = getattr(config, 'ENABLE_DEBUG', False)
+    
+    # 日志级别映射
+    level_priority = {
+        'minimal': 0,
+        'simple': 1, 
+        'detailed': 2,
+        'debug': 3
+    }
+    
+    # 当前级别优先级
+    current_priority = level_priority.get(log_level, 1)
+    
+    # 根据级别决定是否输出
+    should_print = False
+    if level == 'error':
+        should_print = True  # 错误总是输出
+    elif level == 'warning' and current_priority >= 1:
+        should_print = True
+    elif level == 'info' and current_priority >= 1:
+        should_print = True
+    elif level == 'debug' and (current_priority >= 3 or enable_debug):
+        should_print = True
+    
+    if should_print:
+        print(message)
 from evaluate import evaluate_plan
 from collections import defaultdict
 from matplotlib.font_manager import FontProperties, findfont
@@ -42,18 +84,18 @@ def set_chinese_font():
     for font_name in font_names:
         if font_name in available_fonts:
             plt.rcParams['font.sans-serif'] = [font_name]
-            plt.rcParams['axes.unicode_minus'] = False
-            print(f"[DEBUG] 中文字体设置成功: {font_name}")
+            plt.rcParams['axes.unicode_minus'] = False            
+            log_print('debug', f"[DEBUG] 中文字体设置成功: {font_name}", None)
             return font_name
     
     # 如果没有找到专门的中文字体，尝试使用系统默认字体
     try:
         plt.rcParams['font.sans-serif'] = ['DejaVu Sans', 'Arial', 'sans-serif']
         plt.rcParams['axes.unicode_minus'] = False
-        print("[WARNING] 未找到中文字体，使用系统默认字体，可能存在中文显示问题")
+        log_print('warning', "[WARNING] 未找到中文字体，使用系统默认字体，可能存在中文显示问题", None)
         return "Default"
     except Exception as e:
-        print(f"[ERROR] 字体设置失败: {e}")
+        log_print('error', f"[ERROR] 字体设置失败: {e}", None)
         return None
 
 
@@ -129,8 +171,8 @@ class PlanVisualizer:
                         collaboration_log += f"     - UAV {uav_id} 贡献 {actual_contribution} (来自推理结果)\n"
                     else:
                         # 记录详细警告信息
-                        print(f"[WARNING] 协同事件数据不完整: UAV {uav_id} 到达目标 {target_id} 的任务缺少 resource_cost")
-                        print(f"[WARNING] 这可能表明推理过程中的数据记录问题")
+                        log_print('warning', f"[WARNING] 协同事件数据不完整: UAV {uav_id} 到达目标 {target_id} 的任务缺少 resource_cost", self.config)
+                        log_print('warning', f"[WARNING] 这可能表明推理过程中的数据记录问题", self.config)
                         collaboration_log += f"     - UAV {uav_id} 贡献数据缺失 (警告: 数据不完整)\n"
                 
                 collaboration_log += f"   - 事件处理完成\n\n"
@@ -142,9 +184,9 @@ class PlanVisualizer:
         # 【修复中文乱码】确保每次绘图前都正确设置中文字体
         font_name = set_chinese_font()
         if font_name:
-            print(f"[DEBUG] 图表使用字体: {font_name}")
+            log_print('debug', f"[DEBUG] 图表使用字体: {font_name}", self.config)
         else:
-            print("[WARNING] 字体设置可能存在问题，中文显示可能异常")
+            log_print('warning', "[WARNING] 字体设置可能存在问题，中文显示可能异常", self.config)
         
         # 绘制障碍物
         for obs in obstacles:
@@ -161,9 +203,9 @@ class PlanVisualizer:
                     resource_cost = task['resource_cost']
                 else:
                     # 记录详细警告信息，帮助问题诊断
-                    print(f"[WARNING] 数据完整性问题: UAV {uav_id} 的任务缺少 resource_cost 数据")
-                    print(f"[WARNING] 任务详情: target_id={task.get('target_id', 'N/A')}, step={task.get('step', 'N/A')}")
-                    print(f"[WARNING] 使用零向量作为备用方案，可能影响可视化准确性")
+                    log_print('warning', f"[WARNING] 数据完整性问题: UAV {uav_id} 的任务缺少 resource_cost 数据", self.config)
+                    log_print('warning', f"[WARNING] 任务详情: target_id={task.get('target_id', 'N/A')}, step={task.get('step', 'N/A')}", self.config)
+                    log_print('warning', f"[WARNING] 使用零向量作为备用方案，可能影响可视化准确性", self.config)
                     resource_cost = np.zeros_like(uavs[0].resources) if uavs else np.zeros(2)
                 
                 target_collaborators_details[target_id].append({
@@ -183,7 +225,7 @@ class PlanVisualizer:
             # 1. 首先尝试使用推理过程中保存的权威数据
             if hasattr(self, '_inference_total_contribution') and self._inference_total_contribution is not None:
                 total_contribution_all_for_summary = self._inference_total_contribution
-                print(f"[DEBUG] 使用推理过程中的权威总贡献: {total_contribution_all_for_summary}")
+                log_print('debug', f"[DEBUG] 使用推理过程中的权威总贡献: {total_contribution_all_for_summary}", self.config)
             # 2. 其次尝试从 evaluation_metrics 中解析
             elif evaluation_metrics and 'total_contribution' in evaluation_metrics:
                 try:
@@ -192,9 +234,9 @@ class PlanVisualizer:
                     contrib_str = contrib_str.strip('[]')
                     contrib_values = [float(x.strip()) for x in contrib_str.split()]
                     total_contribution_all_for_summary = np.array(contrib_values)
-                    print(f"[DEBUG] 使用评估指标中的总贡献: {total_contribution_all_for_summary}")
+                    log_print('debug', f"[DEBUG] 使用评估指标中的总贡献: {total_contribution_all_for_summary}", self.config)
                 except Exception as e:
-                    print(f"[WARNING] 解析评估指标中的总贡献失败: {e}")
+                    log_print('warning', f"[WARNING] 解析评估指标中的总贡献失败: {e}", self.config)
                     # 降级到计算方案
                     total_contribution_all_for_summary = self._calculate_contribution_from_plan(target_collaborators_details, resource_types)
             else:
@@ -269,46 +311,38 @@ class PlanVisualizer:
         uav_color_map = {u.id: colors[i] for i, u in enumerate(uavs)}
         
         # 绘制路径，确保所有UAV的任务都正确显示
-        if getattr(self.config, 'ENABLE_DEBUG', False):
-            print(f"[DEBUG] 开始绘制所有UAV路径，total UAVs: {len(final_plan)}")
+        log_print('debug', f"[DEBUG] 开始绘制所有UAV路径，total UAVs: {len(final_plan)}", self.config)
         
         for uav_id, tasks in final_plan.items():
-            if getattr(self.config, 'ENABLE_DEBUG', False):
-                print(f"[DEBUG] === 处理UAV {uav_id} ===")
+            log_print('debug', f"[DEBUG] === 处理UAV {uav_id} ===", self.config)
             uav_color = uav_color_map.get(uav_id, 'gray')
             temp_resources = next(u for u in uavs if u.id == uav_id).initial_resources.copy().astype(float)
             
             # 获取无人机起始位置
             uav = next(u for u in uavs if u.id == uav_id)
             current_pos = uav.position
-            if getattr(self.config, 'ENABLE_DEBUG', False):
-                print(f"[DEBUG] UAV {uav_id} 起始位置: {current_pos}")
+            log_print('debug', f"[DEBUG] UAV {uav_id} 起始位置: {current_pos}", self.config)
             
             # 按步骤顺序排序任务
             sorted_tasks = sorted(tasks, key=lambda x: x.get('step', 0))
-            if getattr(self.config, 'ENABLE_DEBUG', False):
-                print(f"[DEBUG] UAV {uav_id} 任务数量: {len(sorted_tasks)}")
+            log_print('debug', f"[DEBUG] UAV {uav_id} 任务数量: {len(sorted_tasks)}", self.config)
             
             # 绘制连续路径
             for i, task in enumerate(sorted_tasks):
-                if getattr(self.config, 'ENABLE_DEBUG', False):
-                    print(f"[DEBUG] UAV {uav_id} 任务 {i+1}/{len(sorted_tasks)}: step{task.get('step', '?')}")
+                log_print('debug', f"[DEBUG] UAV {uav_id} 任务 {i+1}/{len(sorted_tasks)}: step{task.get('step', '?')}", self.config)
                 
                 # 获取目标位置
                 target_id = task['target_id']
                 target = next(t for t in targets if t.id == target_id)
                 target_pos = target.position
 
-                if getattr(self.config, 'ENABLE_DEBUG', False):
-                    print(f"[DEBUG] UAV {uav_id} -> 目标{target_id}: {current_pos} -> {target_pos}")
+                log_print('debug', f"[DEBUG] UAV {uav_id} -> 目标{target_id}: {current_pos} -> {target_pos}", self.config)
                 
                 # 检查路径距离
                 distance_check = np.linalg.norm(np.array(target_pos) - np.array(current_pos))
-                if getattr(self.config, 'ENABLE_DEBUG', False):
-                    print(f"[DEBUG] UAV {uav_id} 路径距离: {distance_check:.2f}m")
+                log_print('debug', f"[DEBUG] UAV {uav_id} 路径距离: {distance_check:.2f}m", self.config)
                 if distance_check < 1.0:
-                    if getattr(self.config, 'ENABLE_DEBUG', False):
-                        print(f"[WARNING] UAV {uav_id} 起点终点过近: {distance_check:.2f}m")
+                    log_print('debug', f"[WARNING] UAV {uav_id} 起点终点过近: {distance_check:.2f}m", self.config)
                 
                 planning_successful = True # 新增：初始化路径规划成功标志
                 # 使用PH-RRT算法生成曲线路径
@@ -332,24 +366,20 @@ class PlanVisualizer:
                         path_points, distance = result
                         path_points = np.array(path_points)
                         if len(path_points) <= 1:
-                            if getattr(self.config, 'ENABLE_DEBUG', False):
-                                print(f"[WARNING] UAV {uav_id} 到目标{target_id} PH-RRT路径点数不足({len(path_points)})，使用平滑曲线")
+                            log_print('warning', f"[WARNING] UAV {uav_id} 到目标{target_id} PH-RRT路径点数不足({len(path_points)})，使用平滑曲线", self.config)
                             path_points = self._generate_smooth_curve(current_pos, target_pos)
                             planning_successful = False
                         else:
-                            if getattr(self.config, 'ENABLE_DEBUG', False):
-                                print(f"[DEBUG] UAV {uav_id} 到目标{target_id} PH-RRT成功，路径点数: {len(path_points)}")
+                            log_print('debug', f"[DEBUG] UAV {uav_id} 到目标{target_id} PH-RRT成功，路径点数: {len(path_points)}", self.config)
                             # 检查路径是否实际移动
                             start_point = path_points[0]
                             end_point = path_points[-1]
                             actual_distance = np.linalg.norm(end_point - start_point)
                             expected_distance = np.linalg.norm(np.array(target_pos) - np.array(current_pos))
-                            if getattr(self.config, 'ENABLE_DEBUG', False):
-                                print(f"[DEBUG] UAV {uav_id} 路径检查: 实际距离={actual_distance:.2f}m, 期望距离={expected_distance:.2f}m")
+                            log_print('debug', f"[DEBUG] UAV {uav_id} 路径检查: 实际距离={actual_distance:.2f}m, 期望距离={expected_distance:.2f}m", self.config)
                             
                             if actual_distance < expected_distance * 0.5:  # 如果实际路径距离小于期望距离的50%
-                                if getattr(self.config, 'ENABLE_DEBUG', False):
-                                    print(f"[WARNING] UAV {uav_id} PH-RRT路径异常(距离不足)，使用平滑曲线")
+                                log_print('warning', f"[WARNING] UAV {uav_id} PH-RRT路径异常(距离不足)，使用平滑曲线", self.config)
                                 path_points = self._generate_smooth_curve(current_pos, target_pos)
                                 planning_successful = False
                     else:
@@ -358,23 +388,20 @@ class PlanVisualizer:
                         planning_successful = False # 新增：更新标志位
                         
                 except Exception as e:
-                    if getattr(self.config, 'ENABLE_DEBUG', False):
-                        print(f"[WARNING] UAV {uav_id} PH-RRT规划异常: {e}，使用平滑曲线")
+                    log_print('warning', f"[WARNING] UAV {uav_id} PH-RRT规划异常: {e}，使用平滑曲线", self.config)
                     path_points = self._generate_smooth_curve(current_pos, target_pos)
                     planning_successful = False # 新增：更新标志位
                 
                 # 绘制路径
                 line_style = '-' if planning_successful else '--'
-                if getattr(self.config, 'ENABLE_DEBUG', False):
-                    print(f"[DEBUG] UAV {uav_id} 绘制路径: 点数={len(path_points)}, 线型={line_style}")
-                    print(f"[DEBUG] UAV {uav_id} 路径范围: X[{path_points[:, 0].min():.1f}, {path_points[:, 0].max():.1f}], Y[{path_points[:, 1].min():.1f}, {path_points[:, 1].max():.1f}]")
+                log_print('debug', f"[DEBUG] UAV {uav_id} 绘制路径: 点数={len(path_points)}, 线型={line_style}", self.config)
+                log_print('debug', f"[DEBUG] UAV {uav_id} 路径范围: X[{path_points[:, 0].min():.1f}, {path_points[:, 0].max():.1f}], Y[{path_points[:, 1].min():.1f}, {path_points[:, 1].max():.1f}]", self.config)
                 
                 ax.plot(path_points[:, 0], path_points[:, 1], 
                        color=uav_color, 
                        linestyle= line_style,#'-' if task.get('is_sync_feasible', True) else '--', 
                        linewidth=2, alpha=0.9, zorder=3)
-                if getattr(self.config, 'ENABLE_DEBUG', False):
-                    print(f"[DEBUG] UAV {uav_id} 路径已绘制到图表")
+                log_print('debug', f"[DEBUG] UAV {uav_id} 路径已绘制到图表", self.config)
                 
                 # 添加步骤标记 - 优化：改进序列顺序的显示清晰度
                 mid_pos = path_points[len(path_points) // 2]
@@ -568,25 +595,23 @@ class PlanVisualizer:
             plt.savefig(img_filepath, dpi=300, format='jpg')
             # 移除重复的输出，只在ResultSaver中输出
         except Exception as e:
-            if getattr(self.config, 'ENABLE_DEBUG', False):
-                print(f"❌ 错误：无法保存结果图至 {img_filepath}")
-                print(f"📄 文件写入错误详情：")
-                print(f"   - 文件名: {base_filename}.jpg")
-                print(f"   - 存储位置: {output_dir}")
-                print(f"   - 完整路径: {img_filepath}")
-                print(f"   - 图表尺寸: {fig.get_size_inches()}")
-                print(f"   - 错误原因: {e}")
-                print(f"   - 错误类型: {type(e).__name__}")
+            log_print('error', f"❌ 错误：无法保存结果图至 {img_filepath}", self.config)
+            log_print('error', f"📄 文件写入错误详情：", self.config)
+            log_print('error', f"   - 文件名: {base_filename}.jpg", self.config)
+            log_print('error', f"   - 存储位置: {output_dir}", self.config)
+            log_print('error', f"   - 完整路径: {img_filepath}", self.config)
+            log_print('error', f"   - 图表尺寸: {fig.get_size_inches()}", self.config)
+            log_print('error', f"   - 错误原因: {e}", self.config)
+            log_print('error', f"   - 错误类型: {type(e).__name__}", self.config)
             
             # 尝试输出图表内容信息
             try:
-                print(f"   - 图表轴数量: {len(fig.axes)}")
-                print(f"   - 图表DPI: {fig.dpi}")
-                print(f"   - 输出目录是否存在: {os.path.exists(output_dir)}")
-                print(f"   - 输出目录权限: {os.access(output_dir, os.W_OK) if os.path.exists(output_dir) else 'N/A'}")
+                log_print('error', f"   - 图表轴数量: {len(fig.axes)}", self.config)
+                log_print('error', f"   - 图表DPI: {fig.dpi}", self.config)
+                log_print('error', f"   - 输出目录是否存在: {os.path.exists(output_dir)}", self.config)
+                log_print('error', f"   - 输出目录权限: {os.access(output_dir, os.W_OK) if os.path.exists(output_dir) else 'N/A'}", self.config)
             except Exception as inner_e:
-                if getattr(self.config, 'ENABLE_DEBUG', False):
-                    print(f"   - 无法获取详细信息: {inner_e}")
+                log_print('debug', f"   - 无法获取详细信息: {inner_e}", self.config)
         
         plt.close(fig)
         
@@ -612,16 +637,16 @@ class PlanVisualizer:
             for detail in details:
                 target_total += detail['resource_cost']
             target_contributions[target_id] = target_total
-            print(f"[DEBUG] 目标 {target_id} 总贡献: {target_total}")
+            log_print('debug', f"[DEBUG] 目标 {target_id} 总贡献: {target_total}", self.config)
         
         # 计算所有目标的贡献总和
         if target_contributions:
             total_contribution = np.sum(list(target_contributions.values()), axis=0)
-            print(f"[DEBUG] 从final_plan重新计算总贡献: {total_contribution}")
-            print(f"[DEBUG] 计算基础: {len(target_contributions)} 个目标")
+            log_print('debug', f"[DEBUG] 从final_plan重新计算总贡献: {total_contribution}", self.config)
+            log_print('debug', f"[DEBUG] 计算基础: {len(target_contributions)} 个目标", self.config)
         else:
             total_contribution = np.zeros(resource_types)
-            print(f"[DEBUG] 无贡献数据，使用零向量")
+            log_print('debug', f"[DEBUG] 无贡献数据，使用零向量", self.config)
         
         return total_contribution
 
@@ -790,18 +815,16 @@ class ModelEvaluator:
         try:
             # 创建深拷贝以防止数据污染
             final_plan_copy = copy.deepcopy(final_plan)
-            if getattr(self.config, 'ENABLE_DEBUG', False):
-                print(f"[DEBUG] 已创建 final_plan 深拷贝，防止数据污染")
+            log_print('debug', f"[DEBUG] 已创建 final_plan 深拷贝，防止数据污染", self.config)
             
             # 使用副本调用评估函数
             return evaluate_plan(final_plan_copy, uavs, targets, **kwargs)
             
         except Exception as e:
-            if getattr(self.config, 'ENABLE_DEBUG', False):
-                print(f"[ERROR] 深拷贝操作失败: {type(e).__name__}: {e}")
-                print(f"[WARNING] 降级到使用原始对象进行评估")
-                print(f"[WARNING] 这可能导致 evaluate_plan 函数修改原始数据，存在数据污染风险")
-                print(f"[DEBUG] 建议检查 final_plan 数据结构是否包含不可序列化的对象")
+            log_print('error', f"[ERROR] 深拷贝操作失败: {type(e).__name__}: {e}", self.config)
+            log_print('warning', f"[WARNING] 降级到使用原始对象进行评估", self.config)
+            log_print('warning', f"[WARNING] 这可能导致 evaluate_plan 函数修改原始数据，存在数据污染风险", self.config)
+            log_print('debug', f"[DEBUG] 建议检查 final_plan 数据结构是否包含不可序列化的对象", self.config)
             
             # 降级方案：使用原始对象但记录警告
             return evaluate_plan(final_plan, uavs, targets, **kwargs)
@@ -825,16 +848,14 @@ class ModelEvaluator:
             if results and 'completion_rate' in results:
                 # 使用推理结果中的完成率作为最终结果
                 evaluation_metrics['completion_rate'] = results['completion_rate']
-                if getattr(self.config, 'ENABLE_DEBUG', False):
-                    print(f"[DEBUG] 使用推理结果中的完成率: {results['completion_rate']:.4f}")
+                log_print('debug', f"[DEBUG] 使用推理结果中的完成率: {results['completion_rate']:.4f}", self.config)
                 
                 # 如果有推理任务分配方案，使用推理结果覆盖evaluate_plan的结果
                 if 'inference_task_assignments' in results and 'inference_target_status' in results and getattr(self.config, 'ENABLE_DEBUG', False):
-                    print(f"[DEBUG] 使用推理任务分配方案作为最终结果")
+                    log_print('debug', f"[DEBUG] 使用推理任务分配方案作为最终结果", self.config)
                     # 可以在这里添加逻辑来使用推理结果覆盖evaluate_plan的某些指标
             else:
-                if getattr(self.config, 'ENABLE_DEBUG', False):
-                    print(f"[DEBUG] 使用evaluate_plan计算的完成率: {evaluation_metrics.get('completion_rate', 0):.4f}")
+                log_print('debug', f"[DEBUG] 使用evaluate_plan计算的完成率: {evaluation_metrics.get('completion_rate', 0):.4f}", self.config)
             
             # 生成可视化和报告
             training_time = 0.0  # 推理阶段无训练时间
@@ -871,8 +892,7 @@ class ModelEvaluator:
         
         # 如果提供了step_details，直接使用；否则从action_sequence重建
         if step_details:
-            if getattr(self.config, 'ENABLE_DEBUG', False):
-                print(f"[DEBUG] 使用提供的step_details构建执行计划，步骤数: {len(step_details)}")
+            log_print('debug', f"[DEBUG] 使用提供的step_details构建执行计划，步骤数: {len(step_details)}", self.config)
             for step, details in enumerate(step_details):
                 uav_id = details['uav_id']
                 target_id = details['target_id']
@@ -897,14 +917,12 @@ class ModelEvaluator:
                     'is_sync_feasible': True # 推理中默认为真
                 }
                 uav_assignments[uav_id].append(task_detail)
-                if getattr(self.config, 'ENABLE_DEBUG', False):
-                    print(f"[DEBUG] 添加任务到UAV {uav_id}: {task_detail}")
+                log_print('debug', f"[DEBUG] 添加任务到UAV {uav_id}: {task_detail}", self.config)
 
                 # 更新UAV的当前位置，用于计算下一段航程的距离
                 temp_uav_positions[uav_id] = target.position.copy()
         else:
-            if getattr(self.config, 'ENABLE_DEBUG', False):
-                print(f"[DEBUG] 从action_sequence重建执行计划，动作数: {len(action_sequence)}")
+            log_print('debug', f"[DEBUG] 从action_sequence重建执行计划，动作数: {len(action_sequence)}", self.config)
             # 从action_sequence重建（备用方案）
             for step, action_idx in enumerate(action_sequence):
                 try:
@@ -932,7 +950,7 @@ class ModelEvaluator:
                             'is_sync_feasible': True
                         }
                         uav_assignments[uav.id].append(task_detail)
-                        print(f"[DEBUG] 添加任务到UAV {uav.id}: {task_detail}")
+                        log_print('debug', f"[DEBUG] 添加任务到UAV {uav.id}: {task_detail}", self.config)
 
                         # 更新UAV的当前位置
                         temp_uav_positions[uav.id] = target.position.copy()
@@ -1013,10 +1031,10 @@ class ModelEvaluator:
             
             # 4. 优先使用推理结果中的完成率，确保数据一致性
             if 'completion_rate' in results:
-                print(f"[DEBUG] 使用推理结果中的完成率: {results['completion_rate']:.4f}")
+                log_print('debug', f"[DEBUG] 使用推理结果中的完成率: {results['completion_rate']:.4f}", self.config)
                 evaluation_metrics['completion_rate'] = results['completion_rate']
             else:
-                print(f"[DEBUG] 使用evaluate_plan计算的完成率: {evaluation_metrics.get('completion_rate', 0):.4f}")
+                log_print('debug', f"[DEBUG] 使用evaluate_plan计算的完成率: {evaluation_metrics.get('completion_rate', 0):.4f}", self.config)
             
             # 5. 将权威评估结果合并到results中，作为唯一数据源
             results.update(evaluation_metrics)
@@ -1332,7 +1350,7 @@ class ModelEvaluator:
             
             # 3. 优先使用推理结果中的完成率，确保数据一致性
             if 'completion_rate' in results:
-                print(f"[DEBUG] 使用集成推理结果中的完成率: {results['completion_rate']:.4f}")
+                log_print('debug', f"[DEBUG] 使用集成推理结果中的完成率: {results['completion_rate']:.4f}", self.config)
         
         return results
     
@@ -1482,10 +1500,18 @@ class ModelEvaluator:
         step_count = 0
         max_steps = 100
         action_sequence = []        
-        step_details = [] # 新增：用于存储每一步的详细执行“事实”
+        step_details = [] # 新增：用于存储每一步的详细执行"事实"
+        
+        # 【性能分析】推理时间统计
+        inference_times = []
+        transfer_times = []
+        action_selection_times = []
+        env_step_times = []
 
         with torch.no_grad():
             while step_count < max_steps:
+                step_start_time = time.time()
+                
                 # 准备状态张量
                 if env.obs_mode == "flat":
                     state_tensor = torch.FloatTensor(state).unsqueeze(0).to(self.device)
@@ -1500,8 +1526,14 @@ class ModelEvaluator:
                         else:
                             state_tensor[key] = torch.FloatTensor(value).unsqueeze(0).to(self.device)
                 
+                transfer_time = time.time() - step_start_time
+                transfer_times.append(transfer_time)
+                
                 # 获取Q值
+                inference_start = time.time()
                 q_values = network(state_tensor)
+                inference_time = time.time() - inference_start
+                inference_times.append(inference_time)
                 
                 # 获取动作掩码
                 action_mask = env.get_action_mask()
@@ -1511,59 +1543,59 @@ class ModelEvaluator:
                     break
                 
                 # 添加调试信息：显示动作候选列表
-                if self.config.ENABLE_DEBUG:
+                # 【GPU性能优化】减少调试信息输出频率，避免频繁的GPU-CPU数据传输
+                if self.config.ENABLE_DEBUG and (step_count < 3 or step_count % 5 == 0):
                     print(f"\n[DEBUG] 步骤 {step_count + 1} 动作候选列表: "
                           f"  有效动作数量: {len(valid_actions)}"
                           f"  有效动作索引: {valid_actions.tolist()}")
                     
-                    # 显示所有动作的详细信息
-                    for i, action_idx in enumerate(valid_actions):
-                        try:
-                            target_idx, uav_idx, phi_idx = env._action_to_assignment(action_idx)
-                            target = env.targets[target_idx]
-                            uav = env.uavs[uav_idx]
-                            q_value = q_values[0][action_idx].item()
-                            
-                            # 计算距离和资源信息
-                            uav_pos = uav.position
-                            target_pos = target.position
-                            distance = np.linalg.norm(uav_pos - target_pos)
-                            
-                            # 获取UAV当前资源和目标需求
-                            uav_resources = uav.resources
-                            target_needs = target.resources
-                            
-                            # 计算可能的资源贡献
-                            possible_contribution = np.minimum(uav_resources, target_needs)
-                            total_possible = np.sum(possible_contribution)
-                        
-
-                            print(f"    动作{i+1} (索引{action_idx}): UAV{uav.id}->Target{target.id}"
-                                  f"      - Q值: {q_value:.3f}"
-                                  f"      - 距离: {distance:.2f}m"
-                                  f"      - UAV资源: {uav_resources}"
-                                  f"      - 目标需求: {target_needs}"
-                                  f"      - 可能贡献: {possible_contribution} (总计: {total_possible:.1f})")
-
-                        except Exception as e:
-                            print(f"    动作{i+1} (索引{action_idx}): 解析失败 - {e}"
-                                  f"      - Q值: {q_values[0][action_idx].item():.3f}")
+                    # 只在关键步骤显示详细信息，减少GPU-CPU传输
+                    if step_count < 3:
+                        for i, action_idx in enumerate(valid_actions[:3]):  # 只显示前3个动作
+                            try:
+                                target_idx, uav_idx, phi_idx = env._action_to_assignment(action_idx)
+                                target = env.targets[target_idx]
+                                uav = env.uavs[uav_idx]
+                                q_value = q_values[0][action_idx].item()
+                                
+                                # 计算距离和资源信息
+                                uav_pos = uav.position
+                                target_pos = target.position
+                                distance = np.linalg.norm(uav_pos - target_pos)
+                                
+                                # 获取UAV当前资源和目标需求
+                                uav_resources = uav.resources
+                                target_needs = target.resources
+                                
+                                # 计算可能的资源贡献
+                                possible_contribution = np.minimum(uav_resources, target_needs)
+                                total_possible = np.sum(possible_contribution)
+                                
+                                print(f"    动作{i+1} (索引{action_idx}): UAV{uav.id}->Target{target.id}")
+                                print(f"      - Q值: {q_value:.3f}")
+                                print(f"      - 距离: {distance:.2f}m")
+                                print(f"      - UAV资源: {uav_resources}")
+                                print(f"      - 目标需求: {target_needs}")
+                                print(f"      - 可能贡献: {possible_contribution} (总计: {total_possible:.1f})")
+                            except Exception as e:
+                                print(f"    动作{i+1} (索引{action_idx}): 解析失败 - {e}")
+                                print(f"      - Q值: {q_values[0][action_idx].item():.3f}")
                 
-                # 选择动作
+                # 【GPU性能优化】优化的动作选择，减少GPU-CPU传输
+                action_selection_start = time.time()
                 if use_softmax_sampling:
-                    # Softmax采样
-                    valid_q_values = q_values[0][valid_actions]
+                    # 在GPU上完成softmax采样，减少传输
+                    valid_actions_tensor = torch.tensor(valid_actions, device=self.device, dtype=torch.long)
+                    valid_q_values = q_values[0][valid_actions_tensor]
                     probs = torch.softmax(valid_q_values / 0.1, dim=0)  # 温度参数0.1
                     action_idx = torch.multinomial(probs, 1).item()
                     action = valid_actions[action_idx]
                     
-                    # 添加调试信息：显示选择过程
-                    if self.config.ENABLE_DEBUG:
+                    # 只在关键步骤显示调试信息
+                    if self.config.ENABLE_DEBUG and (step_count < 3 or step_count % 5 == 0):
                         selected_prob = probs[action_idx].item()
                         print(f"  [DEBUG] Softmax采样选择过程:" 
-                            f"    - 有效Q值: {valid_q_values.tolist()}"
-                            f"    - 选择概率: {probs.tolist()}"
-                            f"    - 选择索引: {action_idx} \n"
+                            f"    - 选择索引: {action_idx}"
                             f"    - 最终动作: {action}, 概率: {selected_prob:.4f}")
                 else:
                     # 贪婪选择
@@ -1571,12 +1603,15 @@ class ModelEvaluator:
                     masked_q_values[~torch.tensor(action_mask, dtype=torch.bool)] = float('-inf')
                     action = masked_q_values.argmax().item()
                     
-                    # 添加调试信息：显示贪婪选择
-                    if self.config.ENABLE_DEBUG:
+                    # 只在关键步骤显示调试信息
+                    if self.config.ENABLE_DEBUG and (step_count < 3 or step_count % 5 == 0):
                         max_q_value = masked_q_values[action].item()
                         print(f"  [DEBUG] 贪婪选择过程:")
                         print(f"    - 最大Q值: {max_q_value:.3f}")
                         print(f"    - 选择动作: {action}")
+                
+                action_selection_time = time.time() - action_selection_start
+                action_selection_times.append(action_selection_time)
                 
                 # 执行动作前检查是否有实际贡献（双重验证）
                 target_idx, uav_idx, phi_idx = env._action_to_assignment(action)
@@ -1591,7 +1626,10 @@ class ModelEvaluator:
                 uav_res_before = uav.resources.copy()
 
                 # 执行动作
+                env_step_start = time.time()
                 next_state, reward, done, truncated, info = env.step(action)
+                env_step_time = time.time() - env_step_start
+                env_step_times.append(env_step_time)
                 # 从info中提取reward_breakdown
                 reward_breakdown = info.get('reward_breakdown', {})
                 actual_contribution = uav_res_before - uav.resources
@@ -1605,8 +1643,7 @@ class ModelEvaluator:
                     'phi_idx': phi_idx
                 })
                 # 添加调试信息
-                if self.config.ENABLE_DEBUG:
-                    print(f"[DEBUG] 步骤 {step_count + 1}: UAV{uav.id} -> Target{target.id}, 动作={action}, 奖励={reward:.2f}")
+                log_print('debug', f"[DEBUG] 步骤 {step_count + 1}: UAV{uav.id} -> Target{target.id}, 动作={action}, 奖励={reward:.2f}", self.config)
 
                 # 如果奖励异常（小于-100），打印详细的奖励分解
                 if reward < -100:
@@ -1667,23 +1704,23 @@ class ModelEvaluator:
         original_total_demand_sum = np.sum(original_total_demand)
         
         # 【调试】显示推理结束时的任务分配结果
-        print(f"[DEBUG] 推理任务分配结果:")
-        print(f"- 总需求: {original_total_demand} (总和: {original_total_demand_sum})")
-        print(f"- 推理分配总贡献: {total_contribution} (总和: {total_contribution_sum})")
-        print(f"- 推理完成率: {completion_rate:.4f}")
+        log_print('debug', f"[DEBUG] 推理任务分配结果:", self.config)
+        log_print('debug', f"- 总需求: {original_total_demand} (总和: {original_total_demand_sum})", self.config)
+        log_print('debug', f"- 推理分配总贡献: {total_contribution} (总和: {total_contribution_sum})", self.config)
+        log_print('debug', f"- 推理完成率: {completion_rate:.4f}", self.config)
         
         # 计算目标完成率（完全满足的目标数量比例）
         satisfied_targets = sum(1 for t in env.targets if np.all(t.remaining_resources <= 1e-6))
         total_targets = len(env.targets)
         target_completion_rate = satisfied_targets / total_targets if total_targets > 0 else 1.0
-        print(f"- 推理时完全满足目标数: {satisfied_targets}/{total_targets}")
-        print(f"- 推理时目标完成率: {target_completion_rate:.4f}")
+        log_print('debug', f"- 推理时完全满足目标数: {satisfied_targets}/{total_targets}", self.config)
+        log_print('debug', f"- 推理时目标完成率: {target_completion_rate:.4f}", self.config)
         
         # 显示每个目标的详细状态
         for i, target in enumerate(env.targets):
             remaining = target.remaining_resources
             is_satisfied = np.all(remaining <= 1e-6)
-            print(f"- 目标{i+1}: 剩余需求{remaining}, 完全满足: {is_satisfied}")
+            log_print('debug', f"- 目标{i+1}: 剩余需求{remaining}, 完全满足: {is_satisfied}", self.config)
         
         # 记录推理结束时的任务分配方案
         inference_task_assignments = {}
@@ -1702,12 +1739,39 @@ class ModelEvaluator:
                 'contributed_resources': target.resources - target.remaining_resources
             }
         
-        print(f"[DEBUG] 推理任务分配方案已记录，包含{len(inference_task_assignments)}个UAV和{len(inference_target_status)}个目标")
+        log_print('debug', f"[DEBUG] 推理任务分配方案已记录，包含{len(inference_task_assignments)}个UAV和{len(inference_target_status)}个目标", self.config)
     
+        # 【性能分析】输出推理时间统计
+        if inference_times:
+            avg_inference_time = np.mean(inference_times)
+            avg_transfer_time = np.mean(transfer_times)
+            avg_action_selection_time = np.mean(action_selection_times)
+            avg_env_step_time = np.mean(env_step_times)
+            
+            total_inference_time = sum(inference_times)
+            total_transfer_time = sum(transfer_times)
+            total_action_selection_time = sum(action_selection_times)
+            total_env_step_time = sum(env_step_times)
+            
+            print(f"📊 推理性能分析:")
+            print(f"  平均推理时间: {avg_inference_time*1000:.1f}ms/步")
+            print(f"  平均传输时间: {avg_transfer_time*1000:.1f}ms/步")
+            print(f"  平均动作选择时间: {avg_action_selection_time*1000:.1f}ms/步")
+            print(f"  平均环境步骤时间: {avg_env_step_time*1000:.1f}ms/步")
+            print(f"  总推理时间: {total_inference_time:.3f}s")
+            print(f"  总传输时间: {total_transfer_time:.3f}s")
+            print(f"  总动作选择时间: {total_action_selection_time:.3f}s")
+            print(f"  总环境步骤时间: {total_env_step_time:.3f}s")
+            
+            total_time = total_inference_time + total_transfer_time + total_action_selection_time + total_env_step_time
+            print(f"  推理占比: {total_inference_time/total_time*100:.1f}%")
+            print(f"  传输占比: {total_transfer_time/total_time*100:.1f}%")
+            print(f"  动作选择占比: {total_action_selection_time/total_time*100:.1f}%")
+            print(f"  环境步骤占比: {total_env_step_time/total_time*100:.1f}%")
+        
         # 添加调试信息：显示动作序列
-        if self.config.ENABLE_DEBUG:
-            print(f"\n[DEBUG] 推理完成，动作序列: {action_sequence}")
-            print(f"[DEBUG] 总步数: {step_count}, 总奖励: {total_reward:.2f}, 完成率: {completion_rate:.4f}")
+        log_print('debug', f"\n[DEBUG] 推理完成，动作序列: {action_sequence}", self.config)
+        log_print('debug', f"[DEBUG] 总步数: {step_count}, 总奖励: {total_reward:.2f}, 完成率: {completion_rate:.4f}", self.config)
         
         # 保存推理完成后的UAV状态，用于资源利用率计算
         final_uav_states = []
@@ -1790,55 +1854,55 @@ class ModelEvaluator:
                 if len(valid_actions) == 0:
                     break
                 
-                # 添加调试信息：显示动作候选列表
-                if self.config.ENABLE_DEBUG:
+                # 【GPU性能优化】减少调试信息输出频率，避免频繁的GPU-CPU数据传输
+                if self.config.ENABLE_DEBUG and (step_count < 3 or step_count % 5 == 0):
                     print(f"\n[DEBUG] 集成推理步骤 {step_count + 1} 动作候选列表:")
                     print(f"  有效动作数量: {len(valid_actions)}")
                     print(f"  有效动作索引: {valid_actions.tolist()}")
                     
-                    # 显示所有动作的详细信息
-                    for i, action_idx in enumerate(valid_actions):
-                        try:
-                            target_idx, uav_idx, phi_idx = env._action_to_assignment(action_idx)
-                            target = env.targets[target_idx]
-                            uav = env.uavs[uav_idx]
-                            q_value = ensemble_q_values[0][action_idx].item()
-                            
-                            # 计算距离和资源信息
-                            uav_pos = uav.position
-                            target_pos = target.position
-                            distance = np.linalg.norm(uav_pos - target_pos)
-                            
-                            # 获取UAV当前资源和目标需求
-                            uav_resources = uav.resources
-                            target_needs = target.resources
-                            
-                            # 计算可能的资源贡献
-                            possible_contribution = np.minimum(uav_resources, target_needs)
-                            total_possible = np.sum(possible_contribution)
-                            
-                            print(f"    动作{i+1} (索引{action_idx}): UAV{uav.id}->Target{target.id}")
-                            print(f"      - Q值: {q_value:.3f}")
-                            print(f"      - 距离: {distance:.2f}m")
-                            print(f"      - UAV资源: {uav_resources}")
-                            print(f"      - 目标需求: {target_needs}")
-                            print(f"      - 可能贡献: {possible_contribution} (总计: {total_possible:.1f})")
-                        except Exception as e:
-                            print(f"    动作{i+1} (索引{action_idx}): 解析失败 - {e}")
-                            print(f"      - Q值: {ensemble_q_values[0][action_idx].item():.3f}")
+                    # 只在关键步骤显示详细信息，减少GPU-CPU传输
+                    if step_count < 3:
+                        for i, action_idx in enumerate(valid_actions[:3]):  # 只显示前3个动作
+                            try:
+                                target_idx, uav_idx, phi_idx = env._action_to_assignment(action_idx)
+                                target = env.targets[target_idx]
+                                uav = env.uavs[uav_idx]
+                                q_value = ensemble_q_values[0][action_idx].item()
+                                
+                                # 计算距离和资源信息
+                                uav_pos = uav.position
+                                target_pos = target.position
+                                distance = np.linalg.norm(uav_pos - target_pos)
+                                
+                                # 获取UAV当前资源和目标需求
+                                uav_resources = uav.resources
+                                target_needs = target.resources
+                                
+                                # 计算可能的资源贡献
+                                possible_contribution = np.minimum(uav_resources, target_needs)
+                                total_possible = np.sum(possible_contribution)
+                                
+                                print(f"    动作{i+1} (索引{action_idx}): UAV{uav.id}->Target{target.id}")
+                                print(f"      - Q值: {q_value:.3f}")
+                                print(f"      - 距离: {distance:.2f}m")
+                                print(f"      - UAV资源: {uav_resources}")
+                                print(f"      - 目标需求: {target_needs}")
+                                print(f"      - 可能贡献: {possible_contribution} (总计: {total_possible:.1f})")
+                            except Exception as e:
+                                print(f"    动作{i+1} (索引{action_idx}): 解析失败 - {e}")
+                                print(f"      - Q值: {ensemble_q_values[0][action_idx].item():.3f}")
                 
-                # 集成Softmax采样
-                valid_q_values = ensemble_q_values[0][valid_actions]
+                # 【GPU性能优化】优化的集成Softmax采样，减少GPU-CPU传输
+                valid_actions_tensor = torch.tensor(valid_actions, device=self.device, dtype=torch.long)
+                valid_q_values = ensemble_q_values[0][valid_actions_tensor]
                 probs = torch.softmax(valid_q_values / 0.1, dim=0)
                 action_idx = torch.multinomial(probs, 1).item()
                 action = valid_actions[action_idx]
                 
-                # 添加调试信息：显示选择过程
-                if self.config.ENABLE_DEBUG:
+                # 只在关键步骤显示调试信息
+                if self.config.ENABLE_DEBUG and (step_count < 3 or step_count % 5 == 0):
                     selected_prob = probs[action_idx].item()
                     print(f"  [DEBUG] 集成Softmax采样选择过程:")
-                    print(f"    - 有效Q值: {valid_q_values.tolist()}")
-                    print(f"    - 选择概率: {probs.tolist()}")
                     print(f"    - 选择索引: {action_idx}")
                     print(f"    - 最终动作: {action}, 概率: {selected_prob:.4f}")
                 
@@ -1870,8 +1934,7 @@ class ModelEvaluator:
                 })
                 
                 # 添加调试信息
-                if self.config.ENABLE_DEBUG:
-                    print(f"[DEBUG] 步骤 {step_count + 1}: UAV{uav.id} -> Target{target.id}, 动作={action}, 奖励={reward:.2f}")
+                log_print('debug', f"[DEBUG] 步骤 {step_count + 1}: UAV{uav.id} -> Target{target.id}, 动作={action}, 奖励={reward:.2f}", self.config)
                 
                 total_reward += reward
                 action_sequence.append(action)
@@ -1901,10 +1964,10 @@ class ModelEvaluator:
         original_total_demand_sum = np.sum(original_total_demand)
         
         # 【调试】显示集成推理结束时的任务分配结果
-        print(f"[DEBUG] 集成推理任务分配结果:")
-        print(f"- 总需求: {original_total_demand} (总和: {original_total_demand_sum})")
-        print(f"- 集成推理分配总贡献: {total_contribution} (总和: {total_contribution_sum})")
-        print(f"- 集成推理完成率: {completion_rate:.4f}")
+        log_print('debug', f"[DEBUG] 集成推理任务分配结果:", self.config)
+        log_print('debug', f"- 总需求: {original_total_demand} (总和: {original_total_demand_sum})", self.config)
+        log_print('debug', f"- 集成推理分配总贡献: {total_contribution} (总和: {total_contribution_sum})", self.config)
+        log_print('debug', f"- 集成推理完成率: {completion_rate:.4f}", self.config)
         
         # 计算目标完成率（完全满足的目标数量比例）
         satisfied_targets = sum(1 for t in env.targets if np.all(t.remaining_resources <= 1e-6))
@@ -1936,12 +1999,11 @@ class ModelEvaluator:
                 'contributed_resources': target.resources - target.remaining_resources
             }
         
-        print(f"[DEBUG] 集成推理任务分配方案已记录，包含{len(inference_task_assignments)}个UAV和{len(inference_target_status)}个目标")
+        log_print('debug', f"[DEBUG] 集成推理任务分配方案已记录，包含{len(inference_task_assignments)}个UAV和{len(inference_target_status)}个目标", self.config)
         
         # 添加调试信息：显示动作序列
-        if self.config.ENABLE_DEBUG:
-            print(f"\n[DEBUG] 集成推理完成，动作序列: {action_sequence}")
-            print(f"[DEBUG] 总步数: {step_count}, 总奖励: {total_reward:.2f}, 完成率: {completion_rate:.4f}")
+        log_print('debug', f"\n[DEBUG] 集成推理完成，动作序列: {action_sequence}", self.config)
+        log_print('debug', f"[DEBUG] 总步数: {step_count}, 总奖励: {total_reward:.2f}, 完成率: {completion_rate:.4f}", self.config)
         
         # 保存推理完成后的UAV状态，用于资源利用率计算
         final_uav_states = []

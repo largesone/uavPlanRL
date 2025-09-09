@@ -2284,76 +2284,95 @@ class UAVTaskEnv(gym.Env):
         return np.any(actual_contribution > 0)
     
     def _get_top_k_uavs_for_target(self, target, k=None):
-            """
-            [修正版] 为指定目标获取距离最近且资源匹配的K架无人机。
-            核心逻辑: 1. 找出所有能贡献的UAV并计算距离; 2. 按距离排序; 3. 取前K个。
-            """
-            try:
-                if k is None:
-                    k = self.config.TOP_K_UAVS
-                
-                # 参数边界检查
-                if not isinstance(k, int) or k <= 0:
-                    k = self.config.TOP_K_UAVS
+        """
+        [向量化优化版] 为指定目标获取距离最近且资源匹配的K架无人机。
+        核心优化: 使用NumPy向量化操作替代Python循环，显著提升计算效率。
+        """
+        try:
+            if k is None:
+                k = self.config.TOP_K_UAVS
+            
+            # 参数边界检查
+            if not isinstance(k, int) or k <= 0:
+                k = self.config.TOP_K_UAVS
 
-                # [核心修正] 步骤 1: 找出所有能做出实际贡献的无人机，并记录它们的索引和距离
-                candidate_uavs_with_dist = []
-                target_pos = np.array(target.position)
-                
-                for i, uav in enumerate(self.uavs):
-                    # 筛选条件：无人机有资源，且能对当前目标做出实际贡献
-                    if np.any(uav.resources > 0) and self._has_actual_contribution(target, uav):
-                        uav_pos = np.array(uav.current_position)
-                        distance = np.linalg.norm(target_pos - uav_pos)
-                        
-                        if not (np.isnan(distance) or np.isinf(distance)):
-                            candidate_uavs_with_dist.append((i, distance))
+            if len(self.uavs) == 0:
+                return []
 
-                # [核心修正] 步骤 2 & 3: 计算综合效用分并排序，选择前K个
-                candidate_uavs_with_scores = []
-                for uav_idx, distance in candidate_uavs_with_dist:
-                    uav = self.uavs[uav_idx]
-                    
-                    # 计算资源匹配度 (越小越好)
-                    # 惩罚那些资源远多于需求的UAV，鼓励精确匹配
-                    contribution = np.minimum(uav.resources, target.remaining_resources)
-                    total_contribution = np.sum(contribution)
-                    total_need = np.sum(target.remaining_resources)
-                    
-                    if total_need > 0:
-                        # 资源匹配度：1 - (贡献 / 需求)，值越小说明越匹配
-                        resource_match_score = 1.0 - (total_contribution / total_need)
-                    else:
-                        resource_match_score = 1.0 # 如果目标无需求，则匹配度最低
-
-                    # 归一化距离 (0-1)
-                    normalized_distance = distance / self.config.MAP_SIZE
-                    
-                    # 定义权重
-                    w_dist = 0.6  # 距离权重占60%
-                    w_res = 0.4   # 资源匹配权重占40%
-                    
-                    # 综合效用分 (分数越低越优)
-                    utility_score = w_dist * normalized_distance + w_res * resource_match_score
-                    candidate_uavs_with_scores.append((uav_idx, utility_score))
-
-                # 按综合效用分排序 (升序)
-                candidate_uavs_with_scores.sort(key=lambda x: x[1])
-                
-                top_k_count = min(k, len(candidate_uavs_with_scores))
-                
-                # 返回效用分最高的无人机索引列表
-                return [uav_idx for uav_idx, _ in candidate_uavs_with_scores[:top_k_count]]
-            except Exception as e:
-                print(f"严重错误: Top-K 筛选方法出现异常: {e}，回退到返回所有无人机索引。")
-                return list(range(len(self.uavs)))
+            # === 步骤 1: 向量化筛选和距离计算 ===
+            # 收集所有UAV的位置和资源信息
+            uav_positions = np.array([uav.current_position for uav in self.uavs])  # [N_uav, 2]
+            uav_resources = np.array([uav.resources for uav in self.uavs])  # [N_uav, 2]
+            target_pos = np.array(target.position)  # [2]
+            target_remaining = target.remaining_resources  # [2]
+            
+            # 向量化筛选：找出有资源且能贡献的UAV
+            has_resources = np.any(uav_resources > 0, axis=1)  # [N_uav] 布尔数组
+            
+            # 向量化资源贡献检查
+            possible_contributions = np.minimum(uav_resources, target_remaining)  # [N_uav, 2]
+            can_contribute = np.any(possible_contributions > 0, axis=1)  # [N_uav] 布尔数组
+            
+            # 综合筛选条件
+            valid_uavs = has_resources & can_contribute  # [N_uav] 布尔数组
+            valid_indices = np.where(valid_uavs)[0]  # 有效UAV的索引
+            
+            if len(valid_indices) == 0:
+                return []
+            
+            # 向量化距离计算
+            valid_positions = uav_positions[valid_indices]  # [N_valid, 2]
+            distances = np.linalg.norm(valid_positions - target_pos, axis=1)  # [N_valid]
+            
+            # 过滤无效距离
+            valid_distances = ~(np.isnan(distances) | np.isinf(distances))
+            if not np.any(valid_distances):
+                return []
+            
+            # 更新有效索引和距离
+            valid_indices = valid_indices[valid_distances]
+            distances = distances[valid_distances]
+            
+            # === 步骤 2: 向量化效用分计算 ===
+            valid_resources = uav_resources[valid_indices]  # [N_valid, 2]
+            
+            # 向量化资源匹配度计算
+            contributions = np.minimum(valid_resources, target_remaining)  # [N_valid, 2]
+            total_contributions = np.sum(contributions, axis=1)  # [N_valid]
+            total_need = np.sum(target_remaining)
+            
+            if total_need > 0:
+                resource_match_scores = 1.0 - (total_contributions / total_need)  # [N_valid]
+            else:
+                resource_match_scores = np.ones(len(valid_indices))  # [N_valid]
+            
+            # 向量化距离归一化
+            normalized_distances = distances / self.config.MAP_SIZE  # [N_valid]
+            
+            # 向量化综合效用分计算
+            w_dist = 0.6  # 距离权重占60%
+            w_res = 0.4   # 资源匹配权重占40%
+            utility_scores = w_dist * normalized_distances + w_res * resource_match_scores  # [N_valid]
+            
+            # === 步骤 3: 向量化排序和选择 ===
+            # 使用argsort进行排序，选择前K个
+            sorted_indices = np.argsort(utility_scores)  # 升序排列
+            top_k_count = min(k, len(sorted_indices))
+            top_k_indices = sorted_indices[:top_k_count]
+            
+            # 返回效用分最高的无人机索引列表
+            return valid_indices[top_k_indices].tolist()
+            
+        except Exception as e:
+            print(f"严重错误: Top-K 筛选方法出现异常: {e}，回退到返回所有无人机索引。")
+            return list(range(len(self.uavs)))
 
     
     def get_action_mask(self):
         """
-        生成基于距离剪枝的动作掩码，标识所有有效动作
+        [向量化优化版] 生成基于距离剪枝的动作掩码，标识所有有效动作
         
-        使用Top-K筛选算法减少动作空间，提高训练效率
+        核心优化: 使用向量化操作替代嵌套循环，显著提升计算效率
         
         Returns:
             np.ndarray: 布尔型数组，形状为(n_actions,)，True表示有效动作，False表示无效动作
@@ -2361,62 +2380,93 @@ class UAVTaskEnv(gym.Env):
         try:
             action_mask = np.zeros(self.n_actions, dtype=bool)
             
-            # 为每个目标获取距离最近的K架无人机
+            if len(self.targets) == 0 or len(self.uavs) == 0:
+                return action_mask
+            
+            # === 向量化预处理 ===
+            # 收集所有UAV和目标的资源信息
+            uav_resources = np.array([uav.resources for uav in self.uavs])  # [N_uav, 2]
+            target_remaining = np.array([target.remaining_resources for target in self.targets])  # [N_target, 2]
+            
+            # 向量化资源耗尽检查
+            uav_has_resources = np.any(uav_resources > 0, axis=1)  # [N_uav] 布尔数组
+            
+            # === 向量化动作掩码生成 ===
             for target_idx, target in enumerate(self.targets):
                 try:
                     # 获取该目标的Top-K无人机
                     top_k_uav_indices = self._get_top_k_uavs_for_target(target)
                     
-                    # 只对筛选后的无人机-目标组合进行有效性检查
+                    if len(top_k_uav_indices) == 0:
+                        continue
+                    
+                    # 向量化有效性检查
+                    valid_uav_indices = []
                     for uav_idx in top_k_uav_indices:
-                        try:
-                            # [新增] 如果无人机资源已耗尽，则不应再为其分配任何任务
-                            if np.all(self.uavs[uav_idx].resources <= 0):
-                                # [调试信息] 打印被跳过的无人机
-                                if self.config.ENABLE_DEBUG:
-                                    print(f"  [ACTION MASK DEBUG] 跳过UAV {self.uavs[uav_idx].id}，资源已耗尽: {self.uavs[uav_idx].resources}")
-                                continue
-                            # 索引边界检查
-                            if uav_idx >= len(self.uavs):
-                                # 不打印每个超出范围的无人机索引，避免大量输出
-                                # 在step方法结束时统一汇报超出范围的索引数量
-                                self._invalid_action_count = getattr(self, '_invalid_action_count', 0) + 1
-                                continue
-                                
-                            uav = self.uavs[uav_idx]
-                            
-                            # 遍历所有可能的phi角度
-                            for phi_idx in range(self.graph.n_phi):
-                                try:
-                                    # 计算对应的动作索引
-                                    action_idx = target_idx * (len(self.uavs) * self.graph.n_phi) + uav_idx * self.graph.n_phi + phi_idx
-                                    
-                                    # 动作索引边界检查
-                                    if action_idx >= self.n_actions:
-                                        # 不打印每个超出范围的动作索引，避免大量输出
-                                        # 在step方法结束时统一汇报超出范围的动作数量
-                                        self._invalid_action_count = getattr(self, '_invalid_action_count', 0) + 1
-                                        continue
-                                    
-                                    # 应用原有的有效性检查逻辑
-                                    if self._is_valid_action(target, uav, phi_idx) and self._has_actual_contribution(target, uav):
-                                        action_mask[action_idx] = True
-                                        
-                                except Exception as e:
-                                    print(f"警告: 处理动作 (target={target_idx}, uav={uav_idx}, phi={phi_idx}) 时出错: {e}")
-                                    continue
-                                    
-                        except Exception as e:
-                            print(f"警告: 处理无人机 {uav_idx} 时出错: {e}")
+                        # 边界检查
+                        if uav_idx >= len(self.uavs):
                             continue
-                            
+                        
+                        # 资源检查
+                        if not uav_has_resources[uav_idx]:
+                            if self.config.ENABLE_DEBUG:
+                                print(f"  [ACTION MASK DEBUG] 跳过UAV {self.uavs[uav_idx].id}，资源已耗尽: {self.uavs[uav_idx].resources}")
+                            continue
+                        
+                        # 贡献检查
+                        if not self._has_actual_contribution(target, self.uavs[uav_idx]):
+                            continue
+                        
+                        valid_uav_indices.append(uav_idx)
+                    
+                    if len(valid_uav_indices) == 0:
+                        continue
+                    
+                    # 向量化动作索引计算
+                    valid_uav_indices = np.array(valid_uav_indices)  # [N_valid_uav]
+                    phi_indices = np.arange(self.graph.n_phi)  # [N_phi]
+                    
+                    # 使用广播计算所有有效的动作索引
+                    # action_idx = target_idx * (len(self.uavs) * self.graph.n_phi) + uav_idx * self.graph.n_phi + phi_idx
+                    uav_offsets = valid_uav_indices * self.graph.n_phi  # [N_valid_uav]
+                    phi_offsets = phi_indices  # [N_phi]
+                    
+                    # 广播计算所有组合的动作索引
+                    action_indices = (target_idx * (len(self.uavs) * self.graph.n_phi) + 
+                                    uav_offsets[:, np.newaxis] + 
+                                    phi_offsets[np.newaxis, :])  # [N_valid_uav, N_phi]
+                    
+                    # 展平并过滤边界
+                    action_indices_flat = action_indices.flatten()
+                    valid_action_mask = action_indices_flat < self.n_actions
+                    action_indices_flat = action_indices_flat[valid_action_mask]
+                    
+                    if len(action_indices_flat) == 0:
+                        continue
+                    
+                    # 向量化有效性检查
+                    valid_actions = []
+                    for i, action_idx in enumerate(action_indices_flat):
+                        # 计算对应的uav_idx和phi_idx
+                        relative_idx = action_idx - target_idx * (len(self.uavs) * self.graph.n_phi)
+                        uav_idx = relative_idx // self.graph.n_phi
+                        phi_idx = relative_idx % self.graph.n_phi
+                        
+                        # 检查动作有效性
+                        if (uav_idx < len(self.uavs) and 
+                            self._is_valid_action(target, self.uavs[uav_idx], phi_idx)):
+                            valid_actions.append(action_idx)
+                    
+                    # 批量设置有效动作
+                    if valid_actions:
+                        action_mask[valid_actions] = True
+                        
                 except Exception as e:
                     print(f"警告: 处理目标 {target_idx} 时出错: {e}")
                     continue
             
             # 如果没有有效动作，回退到原始方法
             if not np.any(action_mask):
-                # print("警告: 剪枝后没有有效动作，回退到原始动作掩码生成")
                 return self._get_original_action_mask()
             
             return action_mask
@@ -3001,15 +3051,21 @@ class UAVTaskEnv(gym.Env):
         n_uavs = len(self.uavs)
         n_targets = len(self.targets)
         
-        # UAV有效性掩码
+        # UAV有效性掩码 - 向量化优化
         uav_mask = np.ones(n_uavs, dtype=np.int32)
-        for i, uav in enumerate(self.uavs):
-            uav_mask[i] = int(self._calculate_uav_alive_status(uav, i))
+        if n_uavs > 0:
+            # 向量化计算UAV状态
+            uav_resources = np.array([uav.resources for uav in self.uavs])
+            uav_has_resources = np.any(uav_resources > 0, axis=1)
+            uav_mask = uav_has_resources.astype(np.int32)
         
-        # 目标有效性掩码
+        # 目标有效性掩码 - 向量化优化
         target_mask = np.ones(n_targets, dtype=np.int32)
-        for i, target in enumerate(self.targets):
-            target_mask[i] = int(self._calculate_target_visibility_status(target, i))
+        if n_targets > 0:
+            # 向量化计算目标状态
+            target_resources = np.array([target.remaining_resources for target in self.targets])
+            target_has_resources = np.any(target_resources > 0, axis=1)
+            target_mask = target_has_resources.astype(np.int32)
         
         return {
             "uav_mask": uav_mask,
@@ -3668,26 +3724,34 @@ class UAVTaskEnv(gym.Env):
         n_targets = len(self.targets)
         
         # === 基础有效性掩码 ===
-        # UAV基础掩码：基于资源状态，使用固定维度
+        # UAV基础掩码：基于资源状态，使用固定维度 - 向量化优化
         uav_resource_mask = np.zeros(max_uavs, dtype=np.int32)
-        for i, uav in enumerate(self.uavs):
-            uav_resource_mask[i] = 1 if np.any(uav.resources > 0) else 0
+        if n_uavs > 0:
+            uav_resources = np.array([uav.resources for uav in self.uavs])
+            uav_has_resources = np.any(uav_resources > 0, axis=1)
+            uav_resource_mask[:n_uavs] = uav_has_resources.astype(np.int32)
         
-        # 目标基础掩码：基于剩余资源状态，使用固定维度
+        # 目标基础掩码：基于剩余资源状态，使用固定维度 - 向量化优化
         target_resource_mask = np.zeros(max_targets, dtype=np.int32)
-        for i, target in enumerate(self.targets):
-            target_resource_mask[i] = 1 if np.any(target.remaining_resources > 0) else 0
+        if n_targets > 0:
+            target_resources = np.array([target.remaining_resources for target in self.targets])
+            target_has_resources = np.any(target_resources > 0, axis=1)
+            target_resource_mask[:n_targets] = target_has_resources.astype(np.int32)
         
-        # === 通信/感知掩码 ===
+        # === 通信/感知掩码 - 向量化优化 ===
         # UAV通信掩码：基于is_alive位，使用固定维度
         uav_communication_mask = np.zeros(max_uavs, dtype=np.int32)
-        for i, uav in enumerate(self.uavs):
-            uav_communication_mask[i] = 1 if self._calculate_uav_alive_status(uav, i) > 0.5 else 0
+        if n_uavs > 0:
+            uav_resources = np.array([uav.resources for uav in self.uavs])
+            uav_has_resources = np.any(uav_resources > 0, axis=1)
+            uav_communication_mask[:n_uavs] = uav_has_resources.astype(np.int32)
         
         # 目标可见性掩码：基于is_visible位，使用固定维度
         target_visibility_mask = np.zeros(max_targets, dtype=np.int32)
-        for i, target in enumerate(self.targets):
-            target_visibility_mask[i] = 1 if self._calculate_target_visibility_status(target, i) > 0.5 else 0
+        if n_targets > 0:
+            target_resources = np.array([target.remaining_resources for target in self.targets])
+            target_has_resources = np.any(target_resources > 0, axis=1)
+            target_visibility_mask[:n_targets] = target_has_resources.astype(np.int32)
         
         # === 组合掩码（用于TransformerGNN） ===
         # UAV有效掩码：同时满足资源和通信条件

@@ -7,6 +7,161 @@ import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 from typing import List, Optional, Dict, Any
+import math
+
+class LowRankSelfAttention(nn.Module):
+    """
+    简化的低秩近似自注意力机制
+    
+    核心思想：使用线性投影减少注意力计算复杂度
+    """
+    
+    def __init__(self, d_model: int, low_rank_dim: int, nhead: int, dropout: float = 0.1):
+        super(LowRankSelfAttention, self).__init__()
+        
+        self.d_model = d_model
+        self.low_rank_dim = low_rank_dim
+        self.nhead = nhead
+        
+        # 简化的线性投影
+        self.query_proj = nn.Linear(d_model, low_rank_dim, bias=False)
+        self.key_proj = nn.Linear(d_model, low_rank_dim, bias=False)
+        self.value_proj = nn.Linear(d_model, d_model, bias=False)
+        self.out_proj = nn.Linear(d_model, d_model, bias=False)
+        
+        self.dropout = nn.Dropout(dropout)
+        self.scale = 1.0 / math.sqrt(low_rank_dim)
+        
+        # 初始化权重
+        self._init_weights()
+    
+    def _init_weights(self):
+        """初始化权重"""
+        for module in [self.query_proj, self.key_proj, self.value_proj, self.out_proj]:
+            nn.init.xavier_uniform_(module.weight)
+    
+    def forward(self, x, mask=None):
+        """
+        前向传播
+        
+        Args:
+            x: 输入张量 [batch_size, seq_len, d_model]
+            mask: 注意力掩码 [batch_size, seq_len, seq_len]
+        
+        Returns:
+            torch.Tensor: 输出张量 [batch_size, seq_len, d_model]
+        """
+        batch_size, seq_len, d_model = x.size()
+        
+        # 确保输入在正确的设备上
+        device = x.device
+        x = x.to(device)
+        
+        # 1. 计算Q, K, V
+        q = self.query_proj(x)  # [batch_size, seq_len, low_rank_dim]
+        k = self.key_proj(x)    # [batch_size, seq_len, low_rank_dim]
+        v = self.value_proj(x)  # [batch_size, seq_len, d_model]
+        
+        # 2. 计算注意力分数（在低维空间）
+        scores = torch.matmul(q, k.transpose(-2, -1)) * self.scale  # [batch_size, seq_len, seq_len]
+        
+        # 3. 应用掩码
+        if mask is not None:
+            # 确保掩码在正确的设备上
+            mask = mask.to(device)
+            scores = scores.masked_fill(mask == 0, -1e9)
+        
+        # 4. 计算注意力权重
+        attn_weights = F.softmax(scores, dim=-1)
+        attn_weights = self.dropout(attn_weights)
+        
+        # 5. 应用注意力权重
+        attn_output = torch.matmul(attn_weights, v)  # [batch_size, seq_len, d_model]
+        
+        # 6. 输出投影
+        output = self.out_proj(attn_output)
+        
+        return output
+
+
+class LowRankCrossAttention(nn.Module):
+    """
+    简化的低秩近似交叉注意力机制
+    
+    用于UAV-目标间的交互，通过低秩投影减少计算复杂度
+    """
+    
+    def __init__(self, d_model: int, low_rank_dim: int, nhead: int, dropout: float = 0.1):
+        super(LowRankCrossAttention, self).__init__()
+        
+        self.d_model = d_model
+        self.low_rank_dim = low_rank_dim
+        self.nhead = nhead
+        
+        # 简化的线性投影
+        self.query_proj = nn.Linear(d_model, low_rank_dim, bias=False)
+        self.key_proj = nn.Linear(d_model, low_rank_dim, bias=False)
+        self.value_proj = nn.Linear(d_model, d_model, bias=False)
+        self.out_proj = nn.Linear(d_model, d_model, bias=False)
+        
+        self.dropout = nn.Dropout(dropout)
+        self.scale = 1.0 / math.sqrt(low_rank_dim)
+        
+        # 初始化权重
+        self._init_weights()
+    
+    def _init_weights(self):
+        """初始化权重"""
+        for module in [self.query_proj, self.key_proj, self.value_proj, self.out_proj]:
+            nn.init.xavier_uniform_(module.weight)
+    
+    def forward(self, tgt, memory, tgt_mask=None, memory_mask=None):
+        """
+        前向传播
+        
+        Args:
+            tgt: 目标序列 [batch_size, tgt_len, d_model]
+            memory: 记忆序列 [batch_size, memory_len, d_model]
+            tgt_mask: 目标掩码
+            memory_mask: 记忆掩码
+        
+        Returns:
+            torch.Tensor: 输出张量 [batch_size, tgt_len, d_model]
+        """
+        batch_size, tgt_len, d_model = tgt.size()
+        memory_len = memory.size(1)
+        
+        # 确保输入在正确的设备上
+        device = tgt.device
+        tgt = tgt.to(device)
+        memory = memory.to(device)
+        
+        # 1. 计算Q, K, V
+        q = self.query_proj(tgt)      # [batch_size, tgt_len, low_rank_dim]
+        k = self.key_proj(memory)     # [batch_size, memory_len, low_rank_dim]
+        v = self.value_proj(memory)   # [batch_size, memory_len, d_model]
+        
+        # 2. 计算注意力分数
+        scores = torch.matmul(q, k.transpose(-2, -1)) * self.scale  # [batch_size, tgt_len, memory_len]
+        
+        # 3. 应用掩码
+        if memory_mask is not None:
+            # 确保掩码在正确的设备上
+            memory_mask = memory_mask.to(device)
+            scores = scores.masked_fill(memory_mask == 0, -1e9)
+        
+        # 4. 计算注意力权重
+        attn_weights = F.softmax(scores, dim=-1)
+        attn_weights = self.dropout(attn_weights)
+        
+        # 5. 应用注意力权重
+        attn_output = torch.matmul(attn_weights, v)  # [batch_size, tgt_len, d_model]
+        
+        # 6. 输出投影
+        output = self.out_proj(attn_output)
+        
+        return output
+
 
 class SimpleNetwork(nn.Module):
     """简化的网络结构 - 基础版本"""
@@ -276,6 +431,7 @@ class ZeroShotGNN(nn.Module):
         self.hidden_dims = hidden_dims if hidden_dims else [256, 128]
         self.output_dim = output_dim
         self.dropout = dropout
+        self.config = config  # 保存config引用
         
         # 嵌入维度
         self.embedding_dim = 128
@@ -309,37 +465,72 @@ class ZeroShotGNN(nn.Module):
             nn.LayerNorm(self.embedding_dim)
         )
         
-        # === 2. 自注意力层 ===
-        # UAV内部自注意力
-        self.uav_self_attention = nn.TransformerEncoderLayer(
-            d_model=self.embedding_dim,
-            nhead=8,
-            dim_feedforward=256,
-            dropout=dropout,
-            activation='relu',
-            batch_first=True
-        )
+        # === 2. 注意力层（支持新旧模型兼容） ===
+        # 检查是否使用低秩近似（新版本）或标准Transformer（旧版本）
+        self.use_low_rank_attention = getattr(config, 'USE_LOW_RANK_ATTENTION', True) if config else True
         
-        # 目标内部自注意力
-        self.target_self_attention = nn.TransformerEncoderLayer(
-            d_model=self.embedding_dim,
-            nhead=8,
-            dim_feedforward=256,
-            dropout=dropout,
-            activation='relu',
-            batch_first=True
-        )
+        # 强制启用低秩近似注意力以测试性能
+        if config and hasattr(config, 'FORCE_LOW_RANK_ATTENTION') and config.FORCE_LOW_RANK_ATTENTION:
+            self.use_low_rank_attention = True
         
-        # === 3. 交叉注意力层 ===
-        # UAV-目标交叉注意力
-        self.cross_attention = nn.TransformerDecoderLayer(
-            d_model=self.embedding_dim,
-            nhead=8,
-            dim_feedforward=256,
-            dropout=dropout,
-            activation='relu',
-            batch_first=True
-        )
+        if self.use_low_rank_attention:
+            # 从config获取注意力头数
+            nhead = getattr(config, 'num_heads', 8) if config else 8
+            
+            # UAV内部自注意力 - 使用低秩近似
+            self.uav_self_attention = LowRankSelfAttention(
+                d_model=self.embedding_dim,
+                low_rank_dim=32,  # 低秩维度，远小于embedding_dim
+                nhead=nhead,
+                dropout=dropout
+            )
+            
+            # 目标内部自注意力 - 使用低秩近似
+            self.target_self_attention = LowRankSelfAttention(
+                d_model=self.embedding_dim,
+                low_rank_dim=32,
+                nhead=nhead,
+                dropout=dropout
+            )
+            
+            # UAV-目标交叉注意力 - 使用低秩近似
+            self.cross_attention = LowRankCrossAttention(
+                d_model=self.embedding_dim,
+                low_rank_dim=32,
+                nhead=nhead,
+                dropout=dropout
+            )
+        else:
+            # 从config获取注意力头数
+            nhead = getattr(config, 'num_heads', 8) if config else 8
+            
+            # 标准Transformer层（兼容旧模型）
+            self.uav_self_attention = nn.TransformerEncoderLayer(
+                d_model=self.embedding_dim,
+                nhead=nhead,
+                dim_feedforward=256,
+                dropout=dropout,
+                activation='relu',
+                batch_first=True
+            )
+            
+            self.target_self_attention = nn.TransformerEncoderLayer(
+                d_model=self.embedding_dim,
+                nhead=nhead,
+                dim_feedforward=256,
+                dropout=dropout,
+                activation='relu',
+                batch_first=True
+            )
+            
+            self.cross_attention = nn.TransformerDecoderLayer(
+                d_model=self.embedding_dim,
+                nhead=nhead,
+                dim_feedforward=256,
+                dropout=dropout,
+                activation='relu',
+                batch_first=True
+            )
         
         # === 4. 位置编码 ===
         self.position_encoder = PositionalEncoding(self.embedding_dim, dropout)
@@ -382,6 +573,96 @@ class ZeroShotGNN(nn.Module):
         self._init_weights()
         self._register_gradient_hooks()
     
+    def load_state_dict(self, state_dict, strict=True):
+        """
+        重写load_state_dict方法，支持新旧模型兼容
+        """
+        # 检测模型版本
+        has_old_attention = any('self_attn.in_proj_weight' in key for key in state_dict.keys())
+        
+        if has_old_attention:
+            # 旧模型，根据config决定是否使用低秩近似
+            if getattr(self.config, 'USE_LOW_RANK_ATTENTION', False):
+                print("🔍 检测到旧模型格式，但根据配置使用低秩近似注意力机制")
+                self.use_low_rank_attention = True
+                # 重新初始化低秩注意力层
+                self._init_low_rank_attention_layers()
+            else:
+                print("🔍 检测到旧模型格式，使用标准Transformer注意力机制")
+                self.use_low_rank_attention = False
+                # 重新初始化标准注意力层
+                self._init_old_attention_layers()
+        else:
+            # 新模型，使用低秩近似
+            print("🔍 检测到新模型格式，使用低秩近似注意力机制")
+            self.use_low_rank_attention = True
+        
+        # 调用父类的load_state_dict，忽略不匹配的权重
+        try:
+            return super().load_state_dict(state_dict, strict=False)
+        except Exception as e:
+            print(f"⚠️ 权重加载部分失败，但继续使用新架构: {e}")
+            # 即使权重加载失败，也继续使用新的低秩注意力架构
+            return None
+    
+    def _init_old_attention_layers(self):
+        """初始化旧版本的注意力层"""
+        # 从config获取注意力头数
+        nhead = getattr(self.config, 'num_heads', 8) if hasattr(self, 'config') and self.config else 8
+        
+        self.uav_self_attention = nn.TransformerEncoderLayer(
+            d_model=self.embedding_dim,
+            nhead=nhead,
+            dim_feedforward=256,
+            dropout=self.dropout,
+            activation='relu',
+            batch_first=True
+        )
+        
+        self.target_self_attention = nn.TransformerEncoderLayer(
+            d_model=self.embedding_dim,
+            nhead=nhead,
+            dim_feedforward=256,
+            dropout=self.dropout,
+            activation='relu',
+            batch_first=True
+        )
+        
+        self.cross_attention = nn.TransformerDecoderLayer(
+            d_model=self.embedding_dim,
+            nhead=nhead,
+            dim_feedforward=256,
+            dropout=self.dropout,
+            activation='relu',
+            batch_first=True
+        )
+    
+    def _init_low_rank_attention_layers(self):
+        """初始化低秩近似注意力层"""
+        # 从config获取注意力头数
+        nhead = getattr(self.config, 'num_heads', 8) if hasattr(self, 'config') and self.config else 8
+        
+        self.uav_self_attention = LowRankSelfAttention(
+            d_model=self.embedding_dim,
+            low_rank_dim=32,
+            nhead=nhead,
+            dropout=self.dropout
+        )
+        
+        self.target_self_attention = LowRankSelfAttention(
+            d_model=self.embedding_dim,
+            low_rank_dim=32,
+            nhead=nhead,
+            dropout=self.dropout
+        )
+        
+        self.cross_attention = LowRankCrossAttention(
+            d_model=self.embedding_dim,
+            low_rank_dim=32,
+            nhead=nhead,
+            dropout=self.dropout
+        )
+    
     def _init_weights(self):
         """初始化网络权重 - 数值稳定版本"""
         for name, module in self.named_modules():
@@ -413,6 +694,23 @@ class ZeroShotGNN(nn.Module):
             if param.requires_grad:
                 param.register_hook(gradient_hook)
     
+    def _create_attention_mask(self, padding_mask):
+        """
+        创建注意力掩码
+        
+        Args:
+            padding_mask: [batch_size, seq_len] 布尔掩码，True表示需要忽略的位置
+        
+        Returns:
+            torch.Tensor: [batch_size, seq_len, seq_len] 注意力掩码
+        """
+        batch_size, seq_len = padding_mask.shape
+        # 确保掩码在正确的设备上
+        device = padding_mask.device
+        # 创建2D掩码，True表示需要忽略的位置
+        mask = padding_mask.unsqueeze(1) | padding_mask.unsqueeze(2)  # [batch_size, seq_len, seq_len]
+        return mask.to(device)
+    
     def forward(self, graph_obs):
         """
         前向传播 - 处理图结构观测
@@ -428,13 +726,22 @@ class ZeroShotGNN(nn.Module):
         Returns:
             torch.Tensor: Q值 [batch_size, N_actions]
         """
-        # 提取输入
+        # 提取输入并确保设备一致性
         uav_features = graph_obs["uav_features"]  # [batch_size, N_uav, uav_feat_dim]
         target_features = graph_obs["target_features"]  # [batch_size, N_target, target_feat_dim]
         relative_positions = graph_obs["relative_positions"]  # [batch_size, N_uav, N_target, 2]
         distances = graph_obs["distances"]  # [batch_size, N_uav, N_target]
         uav_mask = graph_obs["masks"]["uav_mask"]  # [batch_size, N_uav]
         target_mask = graph_obs["masks"]["target_mask"]  # [batch_size, N_target]
+        
+        # 确保所有输入张量都在正确的设备上
+        device = next(self.parameters()).device
+        uav_features = uav_features.to(device)
+        target_features = target_features.to(device)
+        relative_positions = relative_positions.to(device)
+        distances = distances.to(device)
+        uav_mask = uav_mask.to(device)
+        target_mask = target_mask.to(device)
         
         # 形状检查和修复 - 处理各种维度情况
         try:
@@ -536,22 +843,47 @@ class ZeroShotGNN(nn.Module):
             if uav_mask_bool.dim() == 1:
                 uav_mask_bool = uav_mask_bool.unsqueeze(0)
             
-            uav_contextualized = self.uav_self_attention(
-                uav_embeddings_enhanced,
-                src_key_padding_mask=uav_mask_bool
-            )  # [batch_size, N_uav, embedding_dim]
-            
-            # 目标内部自注意力 - 学习目标间的依赖关系
-            target_mask_bool = (target_mask == 0)
-            
-            # 确保掩码维度正确 [batch_size, N_target]
-            if target_mask_bool.dim() == 1:
-                target_mask_bool = target_mask_bool.unsqueeze(0)
-            
-            target_contextualized = self.target_self_attention(
-                target_embeddings,
-                src_key_padding_mask=target_mask_bool
-            )  # [batch_size, N_target, embedding_dim]
+            if self.use_low_rank_attention:
+                # 为低秩注意力创建掩码
+                uav_attention_mask = self._create_attention_mask(uav_mask_bool)
+                
+                uav_contextualized = self.uav_self_attention(
+                    uav_embeddings_enhanced,
+                    mask=uav_attention_mask
+                )  # [batch_size, N_uav, embedding_dim]
+                
+                # 目标内部自注意力 - 学习目标间的依赖关系
+                target_mask_bool = (target_mask == 0)
+                
+                # 确保掩码维度正确 [batch_size, N_target]
+                if target_mask_bool.dim() == 1:
+                    target_mask_bool = target_mask_bool.unsqueeze(0)
+                
+                # 为低秩注意力创建掩码
+                target_attention_mask = self._create_attention_mask(target_mask_bool)
+                
+                target_contextualized = self.target_self_attention(
+                    target_embeddings,
+                    mask=target_attention_mask
+                )  # [batch_size, N_target, embedding_dim]
+            else:
+                # 标准Transformer注意力
+                uav_contextualized = self.uav_self_attention(
+                    uav_embeddings_enhanced,
+                    src_key_padding_mask=uav_mask_bool
+                )  # [batch_size, N_uav, embedding_dim]
+                
+                # 目标内部自注意力 - 学习目标间的依赖关系
+                target_mask_bool = (target_mask == 0)
+                
+                # 确保掩码维度正确 [batch_size, N_target]
+                if target_mask_bool.dim() == 1:
+                    target_mask_bool = target_mask_bool.unsqueeze(0)
+                
+                target_contextualized = self.target_self_attention(
+                    target_embeddings,
+                    src_key_padding_mask=target_mask_bool
+                )  # [batch_size, N_target, embedding_dim]
             
             # === 3. 优化的逐无人机交叉注意力 ===
             # 使用逐无人机的方式计算交叉注意力，避免创建巨大张量
@@ -568,12 +900,24 @@ class ZeroShotGNN(nn.Module):
                 
                 # 为单个UAV计算对所有目标的交叉注意力
                 try:
-                    single_uav_aware = self.cross_attention(
-                        tgt=single_uav,  # query: 单个UAV表示
-                        memory=target_contextualized,  # key & value: 所有目标表示
-                        tgt_key_padding_mask=None,  # 单个UAV不需要掩码
-                        memory_key_padding_mask=target_mask_bool
-                    )  # [batch_size, 1, embedding_dim]
+                    if self.use_low_rank_attention:
+                        # 为交叉注意力创建掩码
+                        cross_attention_mask = self._create_attention_mask(target_mask_bool)
+                        
+                        single_uav_aware = self.cross_attention(
+                            tgt=single_uav,  # query: 单个UAV表示
+                            memory=target_contextualized,  # key & value: 所有目标表示
+                            tgt_mask=None,  # 单个UAV不需要掩码
+                            memory_mask=cross_attention_mask
+                        )  # [batch_size, 1, embedding_dim]
+                    else:
+                        # 标准Transformer交叉注意力
+                        single_uav_aware = self.cross_attention(
+                            tgt=single_uav,  # query: 单个UAV表示
+                            memory=target_contextualized,  # key & value: 所有目标表示
+                            tgt_key_padding_mask=None,  # 单个UAV不需要掩码
+                            memory_key_padding_mask=target_mask_bool
+                        )  # [batch_size, 1, embedding_dim]
                     
                     # 将结果存储回原位置
                     uav_target_aware[:, uav_idx, :] = single_uav_aware.squeeze(1)

@@ -38,10 +38,12 @@ from dataclasses import dataclass, field
 class Hyperparameters:
     """模型网络结构参数类 - 统一管理所有网络架构相关参数"""
     
+    # ===== 核心重要参数（标有***） =====
+    num_heads: int = 8                      # 注意力头数（用于Transformer/GAT）***
+    
     # ===== 网络结构参数 =====
     hidden_dim: int = 256                   # GNN隐藏层维度
     num_layers: int = 3                     # 网络层数
-    num_heads: int = 8                      # 注意力头数（用于Transformer/GAT）
     dropout_rate: float = 0.1               # Dropout比例
     
     # ===== 图网络特定参数 =====
@@ -62,8 +64,11 @@ class Hyperparameters:
 class TrainingConfig:
     """训练配置类 - 统一管理所有训练过程参数"""
     
+    # ===== 核心重要参数（标有***） =====
+    episodes: int = 3000                    # 训练轮次 - 观察奖励收敛性 ***
+    patience: int = 300                    # 大幅增加早停耐心值，支持更长时间训练 ***
+
     # ===== 基础训练参数 =====
-    episodes: int = 3000                    # 训练轮次 - 观察奖励收敛性
     learning_rate: float = 0.00005         # 降低学习率，提高数值稳定性
     gamma: float = 0.99                    # 提高折扣因子，更重视长期奖励
     batch_size: int = 256                   # 较大的批次大小，提高训练效率 256-32%显存  
@@ -75,8 +80,8 @@ class TrainingConfig:
     epsilon_decay: float = 0.99995          # 放缓探索率衰减
     epsilon_min: float = 0.01               # 提高最小探索率
     
+      
     # ===== 网络更新参数 =====
-    patience: int = 300                    # 大幅增加早停耐心值，支持更长时间训练
     target_update_freq: int = 20           # 降低目标网络更新频率，增加稳定性    
     log_interval: int = 20                 # 减少日志输出频率
     max_best_models: int = 5               # 保存最优模型的数量，默认为5
@@ -110,15 +115,26 @@ class Config:
         # - 'zero_shot_train': 零样本训练模式，专用于ZeroShotGNN
         self.TRAINING_MODE = 'zero_shot_train'
         
+        # ===== 核心重要参数（标有***） =====
+        self.MAX_UAVS = 50 #100 #25                  # 支持的最大UAV数量，超出会截断** ***
+        self.MAX_TARGETS = 25 # 50 # 15               # 支持的最大目标数量，超出会截断** ***
+        self.MAP_SIZE = 3000 #1000.0              # 地图边长(米)，用于坐标归一化 ***
+        self.MAX_INTERACTION_RANGE = 2000.0 # UAV最大交互距离(米)，超出视为无效 ***
+        self.UAV_MAX_DISTANCE = 2000 #1000.0        # 无人机最大续航距离 ***
+        self.NETWORK_TYPE = 'ZeroShotGNN'    # 切换到ZeroShotGNN进行稳定性调试 ***
+        self.USE_LOW_RANK_ATTENTION = True   # True-使用低秩近似注意力机制，False-标准Transformer ***
+        self.TOP_K_UAVS = 5  # 动作空间剪枝的K值  ***
+        self.LOG_LEVEL ='simple'#  'minimal'#'detailed'#                      # 默认简洁模式 ***
+        
+
         # --- 智能化训练参数 (Intelligent Training Parameters) --- 
-        self.TOP_K_UAVS = 5  # 动作空间剪枝的K值 
         self.APPROACH_REWARD_COEFFICIENT = 0.001  # 接近激励奖励的系数 
         self.STAGNATION_THRESHOLD = 10  # 训练停滞提前终止的阈值
         
         # 强制重新训练标志：
         # - True: 忽略已有模型，强制重新训练
         # - False: 优先加载已有模型，不存在时才训练
-        self.FORCE_RETRAIN = True
+        self.FORCE_RETRAIN = False
         
         # 路径规划精度控制：
         # - True: 使用高精度PH-RRT算法，计算准确但耗时
@@ -135,8 +151,10 @@ class Config:
         self.SAVED_MODEL_PATH = 'output/models/saved_model_final.pth'
         
         # ----- 分级日志输出控制配置 -----
-        # 日志输出级别控制 ('minimal', 'simple', 'detailed', 'debug')
-        self.LOG_LEVEL ='simple'#  'minimal'#'detailed'#                      # 默认简洁模式
+        # ===== 核心重要参数（标有***） =====
+
+        
+        # ===== 日志输出控制 =====
         self.LOG_EPISODE_DETAIL = False                # 是否输出轮次内步的详细信息
         self.LOG_REWARD_DETAIL = False                  # 是否输出奖励分解详细信息
         
@@ -204,7 +222,6 @@ class Config:
         # - 'DeepFCNResidual': 带残差连接的深度网络，缓解梯度消失问题
         # - 'ZeroShotGNN': 零样本图神经网络，具有泛化能力，适合不同规模场景
         # - 'GAT': 图注意力网络，专注于图结构数据处理
-        self.NETWORK_TYPE = 'ZeroShotGNN'    # 切换到ZeroShotGNN进行稳定性调试
 
         # ----- 改进 ZeroShotGNN奖励函数 -----
         self.USE_IMPROVED_REWARD = True  # 启用改进版奖励函数
@@ -228,13 +245,9 @@ class Config:
         self.GRAPH_N_PHI = 1                # 每个目标节点的离散化接近角度数量，影响动作空间大小（默认值设为1，降低动作空间复杂度）
 
         # ----- 环境维度参数 -----
-        # 环境规模限制（用于张量维度统一）：
-        self.MAX_UAVS = 50 #25                  # 支持的最大UAV数量，超出会截断**
-        self.MAX_TARGETS = 25 #15               # 支持的最大目标数量，超出会截断**
-        self.MAP_SIZE = 1000.0              # 地图边长(米)，用于坐标归一化
-        self.MAX_INTERACTION_RANGE = 2000.0 # UAV最大交互距离(米)，超出视为无效
+
+        # ===== 环境规模限制（用于张量维度统一） =====
         self.RESOURCE_DIM = 2                 # 资源维度，例如：货物和燃料
-        self.UAV_MAX_DISTANCE = 1000.0        # 无人机最大续航距离
         self.UAV_VELOCITY_RANGE = [10.0, 50.0] # 无人机速度范围 [min, max]
         self.UAV_ECONOMIC_SPEED = 20.0        # 无人机经济巡航速度
 
@@ -279,8 +292,11 @@ class Config:
         self.CURRICULUM_PERFORMANCE_SMOOTHING = 0.1     # 性能指标平滑系数
         # ----- 渐进式自适应课程学习 (Granular Adaptive Curriculum) -----
         # 精细化课程训练参数
+        # ===== 核心重要参数（标有***） =====
+        self.GRANULAR_CURRICULUM_LEVELS = 30 # 15  #30 #3#              # 课程的总等级数量 ***
+        
+        # ===== 课程学习参数 =====
         self.CURRICULUM_USE_GRANULAR_PROGRESSION = True  # True: 启用渐进式课程, False: 使用原有模板
-        self.GRANULAR_CURRICULUM_LEVELS = 30 #15  #3#              # 课程的总等级数量
         self.CURRICULUM_MASTERY_THRESHOLD = 0.9 # 0.85 #0.50 #        # 课程掌握度阈值，达到此完成率视为掌握
         self.CURRICULUM_PERFORMANCE_WINDOW = 20  #5 #          # 性能评估滑动窗口大小
         self.CURRICULUM_MAX_EPISODES_PER_LEVEL = 500 # 20#      # 单个难度等级最大训练轮次
@@ -293,8 +309,10 @@ class Config:
         self.GRANULAR_START_OBSTACLES = 1                # 起始障碍物数量
         self.GRANULAR_START_ABUNDANCE = 1.5              # 起始资源充裕度 (1.5倍需求)
 
+        # ===== 核心重要参数（标有***） =====
+        self.GRANULAR_END_OBSTACLES = 10 #20                 # 最终障碍物数量 ***
+        
         # --- 课程终点参数 (将直接从全局配置读取 MAX_UAVS 和 MAX_TARGETS) ---
-        self.GRANULAR_END_OBSTACLES = 20                 # 最终障碍物数量
         self.GRANULAR_END_ABUNDANCE = 1.0                # 最终资源充裕度 (1.0倍需求)  
 
         # ----- 掌握度阈值自适应调整机制 -----

@@ -10,7 +10,7 @@
 #    逐步增加无人机和目标的数量，测试模型在不同规模下的性能。
 #    命令:
 #    python advanced_test_suite.py --models ./output/300.pth --test-mode incremental
-#    python advanced_test_suite.py --models ./output/300.pth --test-mode random --num-random-scenarios 1
+#    python advanced_test_suite.py --models ./output/300-50.pth --test-mode random --num-random-scenarios 1
 # 2. 随机测试模式:
 #    生成指定数量的完全随机场景（无人机和目标数量在配置范围内随机），测试模型的泛化能力。
 #    命令:
